@@ -1,0 +1,11 @@
+# 大文件：视频素材不入库（GitHub 单文件限 100MB）
+*.mp4
+*.avi
+# 运行产物
+game_vision/logs/
+game_vision/recordings/
+game_vision/harvest/
+game_vision/__pycache__/
+**/__pycache__/
+# 本机用户设置（含个人选择，不共享）
+game_vision/settings.yaml

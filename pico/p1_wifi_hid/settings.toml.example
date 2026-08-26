@@ -1,0 +1,8 @@
+# 复制此文件为 CIRCUITPY 盘根目录下的 settings.toml，并填入你自己的 Wi-Fi
+# （2.4GHz 网络；Pico 2 W 不支持 5GHz）
+CIRCUITPY_WIFI_SSID = "你的WiFi名称"
+CIRCUITPY_WIFI_PASSWORD = "你的WiFi密码"
+
+# 可选：UDP 端口与心跳超时（毫秒）
+PICO_PORT = "5000"
+PICO_TIMEOUT_MS = "1500"

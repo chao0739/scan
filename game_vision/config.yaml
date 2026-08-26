@@ -1,0 +1,57 @@
+# 外置摄像头游戏目标检测 MVP 配置
+camera:
+  source: 0            # 摄像头编号，或视频文件路径（命令行 --source 可覆盖）
+  width: 1920
+  height: 1080
+  loop_video: false    # 视频文件播放到结尾是否循环
+
+screen:
+  calibration_file: calibration/homography.json
+  output_width: 1280   # 矫正后“虚拟游戏画面”的尺寸（模板尺寸与此绑定）
+  output_height: 720
+
+roi:
+  mode: player         # fixed | player
+  # mode=fixed 时使用（矫正后画面坐标）
+  fixed: [640, 280, 1000, 460]   # x1, y1, x2, y2
+  # mode=player 时：先用名牌模板定位玩家，再取前方区域
+  player:
+    template: templates/players/KEEEE.png   # 玩家名牌模板（菜单「玩家设置」会自动改）
+    search_band: [0, 150, 1280, 620]   # 只在这个区域找名牌 x1,y1,x2,y2
+    match_threshold: 0.55      # 全局搜索阈值
+    local_threshold: 0.5       # 局部跟踪阈值
+    track_window: 120          # 跟踪搜索窗口半径(px)
+    lost_max: 5                # 连续丢失多少帧后全局重搜
+    # 名牌匹配点（名牌左上角）到角色脚底中心的偏移
+    anchor_dx: 23
+    anchor_dy: 12
+  facing: auto         # auto | right | left | both  (auto=按玩家前进方向，未知时两侧)
+  facing_auto:
+    window: 10         # 累计最近 N 帧的世界位移
+    min_move: 20       # 累计位移超过多少像素才切换朝向
+    band: [0, 100, 1280, 600]   # 估计背景滚动用的画面带（避开 HUD）
+    scale: 0.25
+  near_offset: 20      # 从角色中心向前起算
+  far_offset: 320
+  up: 180              # 相对角色脚底向上
+  down: 20
+
+detection:
+  method: template_matching
+  threshold: 0.78
+  scales: [1.0]        # 多尺度匹配，如 [0.9, 1.0, 1.1]
+  grayscale: true
+  flip: true           # 模板水平翻转增强（覆盖怪物左右朝向）
+
+debounce:
+  window_size: 5
+  enter_min_hits: 3    # 最近 N 帧中 >= 3 帧命中 -> detected
+  exit_min_misses: 4   # 最近 N 帧中 >= 4 帧未命中 -> not detected
+
+monster:
+  current: stump_map01   # 对应 templates/<name>/ 目录；启动时会列出所有目录供选择
+  ask_on_start: true     # 启动时是否让人工选择怪物（--monster 指定时跳过）
+
+logging:
+  dir: logs
+  console_every_n: 15
