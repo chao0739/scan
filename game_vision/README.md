@@ -15,10 +15,11 @@ python menu.py
 ```
 数字选功能即可，不用记命令。首次使用按顺序做：
 
-1. **设置 → 摄像头编号**（默认 0，你的外置摄像头是 3）
+1. **设置 → 摄像头**（默认 0；可填编号或名称关键字，Ubuntu 上填 `Insta360` 即可，编号变了也能找到；菜单会列出检测到的摄像头）
 2. **标定屏幕四角**：依次点击游戏画面 左上 → 右上 → 右下 → 左下，按 `s` 保存
-3. **玩家设置 → 新增玩家**：输入玩家 ID，在画面里按空格定格，框住「名字 + 公会牌」，按 `s`
+3. **玩家设置 → 新增玩家**：输入玩家 ID，点一下弹窗取焦点 → 按空格定格 → **贴紧框住名牌**（黑底白字的名字条，有公会牌一起框；不要带角色的脚和背景，否则定位会乱跟）→ 按 `s`
 4. **怪物模板 → 新建怪物** → **手动抠模板** 抠 2–3 张种子 → **半自动采集**（录 2 分钟 → 自动弹出候选缩略图 → 输入编号保存）
+   → **模板去重**（模板超过 ~20 张时做一次：耗时 ≈ ROI 面积 × 模板数 × 2，45 张≈110ms/帧，15 张≈40ms）
 5. **开始检测**
 
 以后日常只需 `python menu.py` → `1`。换地图：怪物模板 → 新建/选择怪物 → 采模板。换号：玩家设置 → 新增/切换。
@@ -52,7 +53,7 @@ python menu.py
 ## 配置 `config.yaml`
 | 段 | 关键项 | 说明 |
 |---|---|---|
-| camera | source / width / height | 摄像头编号或视频路径；建议 1080p 采集 |
+| camera | source / width / height | 摄像头编号 / 名称关键字（如 `Insta360`）/ 视频路径；建议 1080p 采集 |
 | screen | output_width/height | 矫正后虚拟游戏画面尺寸（**模板尺寸与其绑定**，改了要重抠模板） |
 | roi.player | template / match_threshold / local_threshold / track_window | 用玩家名牌 `KEEEE+公会牌` 定位玩家，带局部跟踪 |
 | roi | facing / near_offset / far_offset / up / down | 玩家前方 ROI 的范围。`facing`: `auto`(按前进方向，见下) / `right` / `left` / `both` |
@@ -60,6 +61,12 @@ python menu.py
 | detection | threshold / flip | 模板匹配阈值（当前数据上 0.78 最优）；flip 自动加水平翻转模板 |
 | debounce | window_size / enter_min_hits / exit_min_misses | 滞回去抖：5 帧中 ≥3 命中进入，≥4 未命中退出 |
 | monster | current / ask_on_start | 怪物模板集（`templates/<name>/`）；启动时菜单选择，运行中 `m` 切换 |
+
+## Ubuntu / Linux 注意
+- 必须装 `opencv-python`（带 GUI）。若环境里有 `opencv-python-headless`（例如 easyocr 带进来的），`imshow` 会报错，先 `pip uninstall opencv-python-headless` 再 `pip install "opencv-python>=4.8,<5"`。
+- `camera.py` 在 Linux 用 V4L2，并**先设 MJPG 再设分辨率**（否则 1080p 偶发协商超时读不到帧，或落到 YUYV 只有 5–10 fps）。
+- `/dev/videoN` 编号随插拔顺序变化，且 UVC 摄像头会多出一个元数据节点（如 video3）不能取帧；`python -c "from camera import list_cameras; print(list_cameras())"` 只列出能出图的节点。
+- Insta360 Ace Pro 2（webcam 模式）通过 UVC 只暴露 Brightness，曝光/白平衡/对焦无法从 A 端锁定，靠环境光稳定（避免窗户强光直射）。
 
 ## 标定文件
 `calibration/homography.json` 是实机摄像头的四角（`--calibrate` 会覆盖它）；`homography_shot_mp4.json` 是 shot.mp4 对应的标定。

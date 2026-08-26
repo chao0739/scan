@@ -161,8 +161,8 @@ def main(argv=None):
 
     cfg = load_config(args.config)
     source = args.source if args.source is not None else cfg["camera"]["source"]
-    if isinstance(source, str) and not source.isdigit():
-        source = os.path.abspath(source)
+    if isinstance(source, str) and os.path.exists(source):
+        source = os.path.abspath(source)  # 视频文件；摄像头编号/名称关键字原样交给 FrameSource
     os.chdir(HERE)  # 配置里的相对路径都相对于工程目录
 
     # ---- 人工初始化 1：选择怪物 ----
@@ -261,10 +261,11 @@ def main(argv=None):
                 txt = (f"{state_txt}{side} score={best['score']:.2f} raw={int(best['raw'])} "
                        f"p={roi_provider.player_score:.2f} {latency_ms:.1f}ms fps={src.measured_fps:.1f} "
                        f"f={src.frame_index} face={roi_provider.current_facing} monster={monster}")
-                if writer is not None:
-                    cv2.circle(vis, (out_w - 20, 14), 8, (0, 0, 255), -1)
                 cv2.rectangle(vis, (0, 0), (out_w, 28), (0, 0, 0), -1)
                 cv2.putText(vis, txt, (8, 20), 0, 0.55, (0, 255, 0) if detected else (200, 200, 200), 2)
+                if writer is not None:  # 录制指示：必须画在状态栏之后，否则被黑条盖住
+                    cv2.circle(vis, (out_w - 60, 14), 8, (0, 0, 255), -1)
+                    cv2.putText(vis, "REC", (out_w - 48, 20), 0, 0.55, (0, 0, 255), 2)
                 cv2.imshow("game_vision", vis)
                 k = cv2.waitKey(1) & 0xFF
                 if k == ord("q"):

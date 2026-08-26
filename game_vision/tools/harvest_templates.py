@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 from calibration import Rectifier, load_corners  # noqa: E402
-from camera import open_writer, CAMERA_BACKEND  # noqa: E402
+from camera import open_writer, open_camera, resolve_source  # noqa: E402
 
 HARVEST_DIR = "harvest"
 MARGIN = 8  # 缩略图上下文边距（保存模板时不含）
@@ -58,12 +58,11 @@ def scan(args):
     seeds = load_seeds(args.seeds)
     y1, y2 = (map(int, args.band.split(","))) if args.band else (int(out_h * 0.1), int(out_h * 0.85))
 
-    live = str(args.source).isdigit()
+    src = resolve_source(args.source)
+    live = isinstance(src, int)
     if live:
         # 直接用摄像头：先录制 --seconds 秒到 recordings/，再按文件流程处理（便于之后 pick 复用）
-        cap = cv2.VideoCapture(int(args.source), CAMERA_BACKEND)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg["camera"]["width"])
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg["camera"]["height"])
+        cap = open_camera(src, cfg["camera"]["width"], cfg["camera"]["height"])
         os.makedirs("recordings", exist_ok=True)
         rec_base = os.path.abspath(os.path.join("recordings", f"harvest_{args.name}"))
         rec_path = rec_base + ".mp4"
@@ -229,7 +228,7 @@ def main():
     args = ap.parse_args()
     for k in ("source", "seeds", "out", "calib"):
         v = getattr(args, k, None)
-        if v and not (k == "source" and str(v).isdigit()):
+        if v and not (k == "source" and not os.path.exists(str(v))):  # source 为摄像头编号/名称时不转路径
             setattr(args, k, os.path.abspath(v))
     os.chdir(ROOT)
     scan(args) if args.cmd == "scan" else pick(args)

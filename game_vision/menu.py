@@ -20,9 +20,10 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 import app  # noqa: E402
-from camera import FrameSource, open_writer  # noqa: E402
+from camera import FrameSource, open_writer, list_cameras  # noqa: E402
 from calibration import Rectifier, load_corners, run_calibration_ui  # noqa: E402
 import harvest_templates as hv  # noqa: E402
+import dedupe_templates as dd  # noqa: E402
 
 def open_file(path):
     """跨平台打开文件（图片等）。"""
@@ -103,7 +104,7 @@ def rectifier():
 
 
 def live_freeze_and_drag(title, hint, rect=None):
-    """打开摄像头实时画面（矫正后），空格定格，拖框，s 保存。返回 (frame, (x0,y0,x1,y1)) 或 None。"""
+    """打开摄像头实时画面（矫正后），空格定格 → 拖框 → s 保存。返回 (frame, (x0,y0,x1,y1)) 或 None。"""
     try:
         src = open_source()
     except Exception as e:
@@ -116,8 +117,11 @@ def live_freeze_and_drag(title, hint, rect=None):
             return None
     win = title
     box = {"p0": None, "p1": None}
+    state = {"frozen": None, "frame": None}
 
     def on_mouse(ev, x, y, flags, _):
+        if state["frozen"] is None:
+            return  # 实时状态下鼠标不画框（点击窗口只是取焦点）；先按空格定格
         if ev == cv2.EVENT_LBUTTONDOWN:
             box["p0"], box["p1"] = (x, y), (x, y)
         elif ev == cv2.EVENT_MOUSEMOVE and flags & cv2.EVENT_FLAG_LBUTTON:
@@ -125,38 +129,56 @@ def live_freeze_and_drag(title, hint, rect=None):
         elif ev == cv2.EVENT_LBUTTONUP:
             box["p1"] = (x, y)
 
+    def box_rect():
+        if not (box["p0"] and box["p1"]):
+            return None
+        (x0, y0), (x1, y1) = box["p0"], box["p1"]
+        x0, x1 = sorted((x0, x1))
+        y0, y1 = sorted((y0, y1))
+        return (x0, y0, x1, y1) if (x1 - x0 > 4 and y1 - y0 > 4) else None
+
     cv2.namedWindow(win)
     cv2.setMouseCallback(win, on_mouse)
-    frozen = None
     result = None
+    print("窗口操作：① 先点一下窗口取焦点 → ② 按 空格 定格 → ③ 按住左键拖框 → ④ 按 s 保存。再按空格恢复实时；q 取消")
+    print("提示：按键前先点一下窗口让它获得焦点；若有中文输入法，先切到英文")
     while True:
-        if frozen is None:
+        if state["frozen"] is None:
             ok, f = src.read()
             if not ok:
                 break
-            frame = rect(f)
-        else:
-            frame = frozen
+            state["frame"] = rect(f)
+        frame = state["frozen"] if state["frozen"] is not None else state["frame"]
         vis = frame.copy()
+        r = box_rect()
         if box["p0"] and box["p1"]:
-            cv2.rectangle(vis, box["p0"], box["p1"], (0, 255, 0), 1)
-        msg = hint + ("  [已定格: 拖框后 s 保存, 空格 继续实时]" if frozen is not None else "  [空格 定格]") + "  q 取消"
+            cv2.rectangle(vis, box["p0"], box["p1"], (0, 255, 0) if r else (0, 0, 255), 1)
+        # OpenCV 自带字体不支持中文，窗口内提示只能用英文（中文会显示成 ????）
+        if state["frozen"] is None:
+            status = "LIVE: press SPACE to freeze first"
+        elif r:
+            status = f"FROZEN box={r[2] - r[0]}x{r[3] - r[1]}  press s / Enter to SAVE   space=resume"
+        else:
+            status = "FROZEN: drag a box around the target, then press s   space=resume"
         cv2.rectangle(vis, (0, 0), (vis.shape[1], 26), (0, 0, 0), -1)
-        cv2.putText(vis, msg, (6, 18), 0, 0.55, (0, 255, 255), 1)
+        cv2.putText(vis, f"{hint}  |  {status}  |  q=cancel", (6, 18), 0, 0.5, (0, 255, 255), 1)
         cv2.imshow(win, vis)
         k = cv2.waitKey(20) & 0xFF
-        if k == ord("q"):
+        if k == ord("q") or k == 27:
             break
-        if k == ord(" "):
-            frozen = None if frozen is not None else frame.copy()
+        elif k == ord(" "):
+            state["frozen"] = None if state["frozen"] is not None else frame.copy()
             box["p0"] = box["p1"] = None
-        if k == ord("s") and frozen is not None and box["p0"] and box["p1"]:
-            (x0, y0), (x1, y1) = box["p0"], box["p1"]
-            x0, x1 = sorted((x0, x1))
-            y0, y1 = sorted((y0, y1))
-            if x1 - x0 > 4 and y1 - y0 > 4:
-                result = (frozen, (x0, y0, x1, y1))
+        elif k in (ord("s"), ord("S"), 13, 10):
+            if state["frozen"] is None:
+                print("[s] 还没有定格：先按 空格 定格，再拖框，再按 s")
+            elif r is None:
+                print("[s] 还没有画框（或框太小）：在定格画面上按住鼠标左键拖出一个框")
+            else:
+                result = (state["frozen"], r)
                 break
+        elif k != 255:
+            print(f"[key] 收到按键码 {k}（不是 s/空格/q）")
     src.release()
     cv2.destroyWindow(win)
     return result
@@ -171,8 +193,11 @@ def do_calibrate():
     except Exception as e:
         print("打开摄像头失败:", e)
         return
+    existing = load_corners(sc["calibration_file"])
+    if existing is not None:
+        print("已载入上次的四角作为起点：满意直接按 s 保存；不满意按 r 清空后重新点")
     print("请依次点击游戏画面的 左上 → 右上 → 右下 → 左下，满意后按 s 保存")
-    r = run_calibration_ui(src, sc["calibration_file"], sc["output_width"], sc["output_height"])
+    r = run_calibration_ui(src, sc["calibration_file"], sc["output_width"], sc["output_height"], existing=existing)
     src.release()
     print("标定已保存" if r is not None else "已取消")
 
@@ -185,8 +210,10 @@ def do_player_add():
     pid = ask("输入玩家 ID（游戏里显示的名字，仅用于命名档案）")
     if not pid:
         return
-    print("接下来在摄像头画面里：等玩家名牌清晰可见时按 空格 定格，拖框框住【名字 + 下面的公会牌】，按 s 保存")
-    res = live_freeze_and_drag("set player", f"player={pid}: drag the NAMEPLATE")
+    print("接下来在摄像头画面里：等玩家名牌清晰可见时按 空格 定格，拖框，按 s 保存")
+    print("【框选要点】只框名牌本身（黑底白字的名字条，有公会牌则一起框），四边贴紧，"
+          "不要把角色的脚、树叶、地面等背景框进去——框里背景越多，运行时越容易跟丢或跟到别的东西")
+    res = live_freeze_and_drag("set player", f"player={pid}: drag TIGHTLY around the NAMEPLATE only")
     if res is None:
         print("已取消")
         return
@@ -194,12 +221,14 @@ def do_player_add():
     os.makedirs(PLAYER_DIR, exist_ok=True)
     path = os.path.join(PLAYER_DIR, f"{pid}.png")
     cv2.imwrite(path, frame[y0:y1, x0:x1])
-    # 脚底中心 ≈ 名牌上沿中点（名牌紧贴角色脚下）
+    # 名牌左上角 -> 角色脚底中心：名牌紧贴脚下，脚底 ≈ 名牌上沿中点
     set_setting("roi.player.template", path.replace("\\", "/"))
     set_setting("roi.player.anchor_dx", (x1 - x0) // 2)
-    set_setting("roi.player.anchor_dy", 12)
+    set_setting("roi.player.anchor_dy", 4)
     set_setting("player.current", pid)
     print(f"已保存玩家 {pid} 的名牌 ({x1 - x0}x{y1 - y0}) -> {path}，并设为当前玩家")
+    if (x1 - x0) * (y1 - y0) > 60 * 40:
+        print("  提示：框比较大（名牌通常约 50x20 px）。如果框进了背景/角色，运行时定位会不稳，建议重做并收紧")
 
 
 def do_player_select():
@@ -213,7 +242,7 @@ def do_player_select():
         w = cv2.imread(path).shape[1]
         set_setting("roi.player.template", path.replace("\\", "/"))
         set_setting("roi.player.anchor_dx", w // 2)
-        set_setting("roi.player.anchor_dy", 12)
+        set_setting("roi.player.anchor_dy", 4)
         set_setting("player.current", pid)
         print(f"当前玩家 -> {pid}")
 
@@ -366,6 +395,25 @@ def do_monster_view():
                 print("已删除", os.path.basename(files[i - 1]))
 
 
+def do_monster_dedupe():
+    m = current_monster()
+    if not m:
+        return
+    d = monster_dir(m)
+    n_dup = len(glob.glob(os.path.join(d, dd.DUP_DIR, "*.png")))
+    if n_dup:
+        print(f"（{dd.DUP_DIR}/ 里已有 {n_dup} 张之前去掉的模板，可选择移回）")
+        if ask("移回之前去掉的模板? (y/n)", "n").lower() == "y":
+            print(f"已移回 {dd.restore(d)} 张")
+            return
+    thr = float(ask("相似度阈值（0.75 推荐；越高保留越多）", 0.75))
+    keep, drop = dd.plan(d, thr)
+    print(f"当前 {len(keep) + len(drop)} 张 -> 保留 {len(keep)} 张，可去掉 {len(drop)} 张（移到 {dd.DUP_DIR}/，随时可移回）")
+    if drop and ask("执行? (y/n)", "y").lower() == "y":
+        dd.dedupe(d, thr)
+        print("完成。模板越少检测越快：耗时 ≈ ROI 面积 × 模板数 × 2(翻转)")
+
+
 def do_monster_delete():
     ms = monsters()
     m = choose("删除哪个怪物（整个目录）", [(x, x) for x in ms]) if ms else None
@@ -384,6 +432,7 @@ def menu_monster():
             ("半自动采集（录制 → 扫描 → 挑选）", do_monster_harvest),
             ("重新挑选上次扫描的候选", do_monster_pick_again),
             ("查看 / 删除模板", do_monster_view),
+            ("模板去重（相似的移到 _dup/，加快检测）", do_monster_dedupe),
             ("删除怪物", do_monster_delete),
         ])
         if act is None:
@@ -395,7 +444,7 @@ def menu_settings():
     while True:
         c = cfg()
         act = choose("设置", [
-            (f"摄像头编号  当前: {c['camera']['source']}", "cam"),
+            (f"摄像头      当前: {c['camera']['source']}", "cam"),
             (f"朝向模式    当前: {c['roi']['facing']}  (auto=按前进方向 / left / right / both)", "facing"),
             (f"匹配阈值    当前: {c['detection']['threshold']}", "thr"),
             (f"ROI 前方距离 当前: {c['roi']['near_offset']}~{c['roi']['far_offset']} px", "roi"),
@@ -403,7 +452,9 @@ def menu_settings():
         if act is None:
             return
         if act == "cam":
-            v = ask("摄像头编号（0,1,2,3…）", c["camera"]["source"])
+            cams = list_cameras()
+            print("检测到的摄像头：" + (", ".join(f"{i}={n}" for i, n in cams) if cams else "无"))
+            v = ask("摄像头编号，或名称关键字（如 Insta360，编号变了也能找到）", c["camera"]["source"])
             set_setting("camera.source", int(v) if str(v).isdigit() else v)
         elif act == "facing":
             v = choose("朝向模式", [("auto（按前进方向）", "auto"), ("right", "right"), ("left", "left"), ("both（两侧）", "both")])

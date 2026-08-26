@@ -30,7 +30,7 @@ def main():
     args = ap.parse_args()
     if args.calib:
         args.calib = os.path.abspath(args.calib)
-    source = os.path.abspath(args.source) if not args.source.isdigit() else args.source
+    source = os.path.abspath(args.source) if os.path.exists(args.source) else args.source
     os.chdir(ROOT)
     cfg = yaml.safe_load(open("config.yaml", encoding="utf-8"))
     sc = cfg["screen"]
