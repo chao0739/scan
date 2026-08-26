@@ -56,10 +56,11 @@ python menu.py
 | camera | source / width / height | 摄像头编号 / 名称关键字（如 `Insta360`）/ 视频路径；建议 1080p 采集 |
 | screen | output_width/height | 矫正后虚拟游戏画面尺寸（**模板尺寸与其绑定**，改了要重抠模板） |
 | roi.player | template / match_threshold / local_threshold / track_window | 用玩家名牌 `KEEEE+公会牌` 定位玩家，带局部跟踪 |
-| roi | facing / near_offset / far_offset / up / down | 玩家前方 ROI 的范围。`facing`: `auto`(按前进方向，见下) / `right` / `left` / `both` |
+| roi | facing / near_offset / far_offset / up / down | 玩家前方 ROI 的范围（up/down 只覆盖同一层，默认 70/20；上层平台的怪打不到不算）。`facing`: `auto`(按前进方向，见下) / `right` / `left` / `both` |
 | roi.facing_auto | window / min_move | 前进方向判定：累计最近 N 帧的“角色屏幕位移 − 背景滚动位移”，超过 min_move 像素才切换方向 |
-| detection | threshold / flip | 模板匹配阈值（当前数据上 0.78 最优）；flip 自动加水平翻转模板 |
+| detection | threshold / color_verify.max_dist / edge_min / topk / flip | 模板分阈值（开校验后 0.55）；候选框颜色直方图距离上限 0.48；边缘图匹配下限 0.4；每模板检查的峰数；flip 自动加水平翻转模板 |
 | debounce | window_size / enter_min_hits / exit_min_misses | 滞回去抖：5 帧中 ≥3 命中进入，≥4 未命中退出 |
+| control | mode / attack_key / attack_interval_ms / attack_range_px / walk_max_ms … | 决策：off 只检测 / dry 只打日志 / pico 真发按键。有怪：转身→接近→攻击；没怪：巡逻掉头。`p` 暂停 |
 | monster | current / ask_on_start | 怪物模板集（`templates/<name>/`）；启动时菜单选择，运行中 `m` 切换 |
 
 ## Ubuntu / Linux 注意

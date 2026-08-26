@@ -99,6 +99,12 @@ class ROIProvider:
         self._prev_small = small
         self._prev_px = px
 
+    def set_facing_hint(self, facing):
+        """由决策模块的按键状态直接给出朝向（比位移估计更可靠）。"""
+        if facing in ("left", "right") and facing != self.current_facing:
+            self.current_facing = facing
+            self._moves = []
+
     def rois(self, game_frame):
         """返回 [(name, (x1,y1,x2,y2)), ...]"""
         if self.mode == "fixed":

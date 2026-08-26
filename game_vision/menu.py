@@ -448,6 +448,8 @@ def menu_settings():
             (f"朝向模式    当前: {c['roi']['facing']}  (auto=按前进方向 / left / right / both)", "facing"),
             (f"匹配阈值    当前: {c['detection']['threshold']}", "thr"),
             (f"ROI 前方距离 当前: {c['roi']['near_offset']}~{c['roi']['far_offset']} px", "roi"),
+            (f"控制模式    当前: {c.get('control', {}).get('mode', 'off')}  (off=只检测 / dry=只打日志 / pico=真按键)", "ctl"),
+            (f"攻击键/拾取键/间隔 当前: {c.get('control', {}).get('attack_key')} / {c.get('control', {}).get('pickup_key')} / {c.get('control', {}).get('attack_interval_ms')} ms", "atk"),
         ])
         if act is None:
             return
@@ -463,6 +465,17 @@ def menu_settings():
         elif act == "thr":
             v = ask("阈值 0~1，越高越严格", c["detection"]["threshold"])
             set_setting("detection.threshold", float(v))
+        elif act == "ctl":
+            v = choose("控制模式", [("off（只检测）", "off"), ("dry（只打日志，不发按键）", "dry"), ("pico（真发按键给 Pico）", "pico")])
+            if v:
+                set_setting("control.mode", v)
+        elif act == "atk":
+            k = ask("攻击键（Pico 键名，如 ctrl / shift / a）", c.get("control", {}).get("attack_key", "ctrl"))
+            pk = ask("拾取键（每 0.5~1 s 随机点按一次；输入 none 关闭）", c.get("control", {}).get("pickup_key", "z"))
+            ms = ask("攻击间隔 ms", c.get("control", {}).get("attack_interval_ms", 700))
+            set_setting("control.attack_key", str(k))
+            set_setting("control.pickup_key", None if str(pk).lower() in ("none", "no", "") else str(pk))
+            set_setting("control.attack_interval_ms", int(ms))
         elif act == "roi":
             a = ask("近端(px)", c["roi"]["near_offset"])
             b = ask("远端(px)", c["roi"]["far_offset"])
@@ -483,7 +496,8 @@ def do_run():
     if not os.path.exists(c["roi"]["player"]["template"]):
         print("玩家名牌模板不存在，请先到「玩家设置」新增玩家")
         return
-    print("窗口按键: q 退出 | 空格 暂停 | t 抠模板 | r 录制 | c 重新标定")
+    mode = c.get("control", {}).get("mode", "off")
+    print(f"控制模式: {mode}（在「设置」里改）。窗口按键: q 退出 | 空格 暂停 | p 暂停/恢复控制 | t 抠模板 | r 录制 | c 重新标定")
     app.main(["--source", str(c["camera"]["source"]), "--monster", m])
 
 

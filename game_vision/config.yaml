@@ -33,15 +33,21 @@ roi:
     scale: 0.25
   near_offset: 20      # 从角色中心向前起算
   far_offset: 320
-  up: 180              # 相对角色脚底向上
+  up: 70               # 相对角色脚底向上。只覆盖同一层（地面攻击只打同层；蜗牛高约 40px）。
+                       # 原来 180 会把上一层平台和树叶间的天空框进来 -> 大量误报 + 对空挥刀
   down: 20
 
 detection:
   method: template_matching
-  threshold: 0.78
+  threshold: 0.55      # 模板分阈值。开了 color_verify 后可以放低（候选由颜色校验把关）；不开时需 ~0.78+
   scales: [1.0]        # 多尺度匹配，如 [0.9, 1.0, 1.1]
   grayscale: true
   flip: true           # 模板水平翻转增强（覆盖怪物左右朝向）
+  color_verify:        # 候选框的 H-S 颜色直方图须与模板相近，否则否决（拒掉蓝天/树干/地面等灰度相似的假框）
+    enabled: true
+    max_dist: 0.48     # Bhattacharyya 距离上限。woniu 标注集：无怪候选最小 0.46，有怪多在 0.27~0.48（余量薄，多采数据后重标）
+    edge_min: 0.4      # 候选框与模板在 Sobel 边缘图上的匹配分下限（怪物有粗黑轮廓；灌木/天空假框实测 ≤0.29）
+    topk: 3            # 每张模板检查前几个峰（第一个峰常是假框，真怪可能排第二）
 
 debounce:
   window_size: 5
@@ -51,6 +57,24 @@ debounce:
 monster:
   current: stump_map01   # 对应 templates/<name>/ 目录；启动时会列出所有目录供选择
   ask_on_start: true     # 启动时是否让人工选择怪物（--monster 指定时跳过）
+
+control:                 # P5/P6：检测结果 -> 按键（decision.py）
+  mode: dry              # off=只检测 | dry=只打日志不发按键 | pico=真发给 Pico
+  pico_host: null        # Pico IP；null=局域网广播自动发现（找不到会退化为 dry）
+  attack_key: ctrl       # 攻击键（Pico 键名：a-z 0-9 ctrl shift alt space 等）
+  attack_press_ms: 60
+  attack_interval_ms: 700  # 两次攻击间隔（≈攻击动画时长）；实际不会短于按键执行时间
+  pickup_key: z          # 拾取键：控制期间每隔随机时间点按一次；null 关闭
+  pickup_press_ms: 60
+  pickup_interval_ms: [500, 1000]  # 两次拾取之间的随机间隔范围
+  attack_range_px: 130   # 怪离玩家多近才算进入攻击范围（矫正后画面像素）；更远则先接近
+  approach: true         # 怪太远时按住方向键走过去
+  patrol: true           # 没怪时来回巡逻；false=原地等
+  walk_max_ms: 3000      # 巡逻单方向最多走多久后掉头
+  turn_press_ms: 60      # 转身时方向键点按时长
+  lost_release_frames: 10  # 玩家定位连续丢失多少帧后松开全部按键
+  sync_interval_ms: 1000 # 定期重发期望按键状态（抗 UDP 丢包）
+  start_dir: right
 
 logging:
   dir: logs

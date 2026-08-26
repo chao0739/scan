@@ -25,6 +25,7 @@ from calibration import Rectifier, load_corners, run_calibration_ui
 from debounce import Debouncer
 from detector import TemplateDetector
 from roi import ROIProvider
+from decision import Decision, DryRunActuator, PicoActuator
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_ROOT = "templates"
@@ -104,7 +105,7 @@ def choose_monster(default):
 def build_detector(monster, det_cfg):
     return TemplateDetector(os.path.join(TEMPLATE_ROOT, monster), det_cfg["threshold"],
                             det_cfg.get("scales", [1.0]), det_cfg.get("grayscale", True),
-                            det_cfg.get("flip", True))
+                            det_cfg.get("flip", True), det_cfg.get("color_verify"))
 
 
 def crop_template_ui(game_frame, monster):
@@ -157,6 +158,8 @@ def main(argv=None):
     ap.add_argument("--monster", default=None, help="怪物模板集名称（templates/ 下的目录名）")
     ap.add_argument("--start", type=int, default=0, help="视频起始帧")
     ap.add_argument("--realtime", action="store_true", help="视频回放按原速播放")
+    ap.add_argument("--control", default=None, choices=["off", "dry", "pico"], help="控制模式，覆盖 config.control.mode")
+    ap.add_argument("--pico", default=None, help="Pico IP（覆盖 config.control.pico_host）")
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -207,7 +210,24 @@ def main(argv=None):
     every_n = cfg["logging"].get("console_every_n", 15)
     print(f"[app] source={source} 实际分辨率={src.width}x{src.height} fps={src.fps:.0f} monster={monster} "
           f"templates={len(detector.templates)} log={log_path}")
-    print("[app] 按键: q 退出 | 空格 暂停 | m 切换怪物 | t 新增模板 | c 重新标定 | r 录制")
+    # ---- 控制（P5/P6）----
+    ctl_cfg = dict(cfg.get("control") or {})
+    ctl_mode = args.control or ctl_cfg.get("mode", "off")
+    decision = None
+    if ctl_mode in ("dry", "pico"):
+        actuator = None
+        if ctl_mode == "pico":
+            try:
+                from pico_client import PicoClient
+                actuator = PicoActuator(PicoClient(args.pico or ctl_cfg.get("pico_host")))
+                print("[ctl] 已连接 Pico，真实发送按键。按 p 暂停/恢复")
+            except Exception as e:
+                print(f"[ctl] 连接 Pico 失败（{e}），退化为 dry-run")
+        if actuator is None:
+            actuator = DryRunActuator(log=lambda m: print(m) if src.is_file else None)
+            print("[ctl] dry-run：只打日志不发按键。按 p 暂停/恢复")
+        decision = Decision(ctl_cfg, actuator)
+    print("[app] 按键: q 退出 | 空格 暂停 | m 切换怪物 | t 新增模板 | c 重新标定 | r 录制 | p 暂停/恢复控制")
     writer = None
 
     show = not args.no_show
@@ -225,20 +245,33 @@ def main(argv=None):
             t0 = time.perf_counter()
             game = rect(frame)
             rois = roi_provider.rois(game)
-            best = {"score": -1.0, "loc": None, "template": None, "raw": False}
+            best = {"score": -1.0, "loc": None, "template": None, "raw": False, "color_dist": None, "edge_score": None, "verified": False}
             best_roi = None
             for name, (x1, y1, x2, y2) in rois:
                 r = detector.detect(game[y1:y2, x1:x2])
                 if r["score"] > best["score"]:
                     best, best_roi = r, (name, (x1, y1, x2, y2))
             detected = debouncer.update(best["raw"])
+            # 怪到玩家的水平距离（矫正后像素）：用于判断先接近还是直接攻击
+            dist = None
+            if best_roi and best["loc"] and roi_provider.last_player:
+                (x1, _, x2, _), (lx, _, lw, _) = best_roi[1], best["loc"]
+                dist = abs((x1 + lx + lw / 2) - roi_provider.last_player[0])
+            ctl_state = None
+            if decision is not None:
+                ctl_state = decision.update(roi_provider.last_player is not None and roi_provider.lost_frames == 0,
+                                            detected, best_roi[0] if best_roi else None, dist)
+                roi_provider.set_facing_hint(decision.facing)
             latency_ms = (time.perf_counter() - t0) * 1000
 
             rec = {"timestamp": round(time.time(), 3), "frame": src.frame_index, "monster": monster,
                    "detected": detected, "raw": best["raw"], "score": round(best["score"], 4),
-                   "template": best["template"], "roi": best_roi[1] if best_roi else None,
+                   "template": best["template"], "color_dist": best.get("color_dist"), "edge_score": best.get("edge_score"), "verified": best.get("verified"),
+                   "roi": best_roi[1] if best_roi else None,
                    "side": best_roi[0] if best_roi else None, "facing": roi_provider.current_facing,
                    "player": roi_provider.last_player, "player_score": round(roi_provider.player_score, 3),
+                   "dist": None if dist is None else round(dist), "ctl": ctl_state,
+                   "held": decision.held if decision else None,
                    "latency_ms": round(latency_ms, 2)}
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             if detected != last_state or src.frame_index % every_n == 0:
@@ -258,7 +291,10 @@ def main(argv=None):
                     cv2.rectangle(vis, (x1 + lx, y1 + ly), (x1 + lx + lw, y1 + ly + lh), color, 2)
                 state_txt = "DETECTED" if detected else "none"
                 side = f"[{best_roi[0]}]" if best_roi else ""
-                txt = (f"{state_txt}{side} score={best['score']:.2f} raw={int(best['raw'])} "
+                cd = f" cd={best['color_dist']:.2f}" if best.get("color_dist") is not None else ""
+                cd += f" eg={best['edge_score']:.2f}" if best.get("edge_score") is not None else ""
+                ctl_txt = f" ctl={ctl_state}{'/' + decision.held if decision and decision.held else ''}" if decision else ""
+                txt = (f"{state_txt}{side}{ctl_txt} score={best['score']:.2f}{cd} raw={int(best['raw'])} "
                        f"p={roi_provider.player_score:.2f} {latency_ms:.1f}ms fps={src.measured_fps:.1f} "
                        f"f={src.frame_index} face={roi_provider.current_facing} monster={monster}")
                 cv2.rectangle(vis, (0, 0), (out_w, 28), (0, 0, 0), -1)
@@ -271,7 +307,12 @@ def main(argv=None):
                 if k == ord("q"):
                     break
                 elif k == ord(" "):
+                    if decision is not None:
+                        decision.release_all()
                     cv2.waitKey(0)
+                elif k == ord("p") and decision is not None:
+                    decision.set_paused(not decision.paused)
+                    print("[ctl] 已暂停控制（按 p 恢复）" if decision.paused else "[ctl] 已恢复控制")
                 elif k == ord("m"):
                     ms = list_monsters()
                     monster = ms[(ms.index(monster) + 1) % len(ms)] if monster in ms else ms[0]
@@ -304,6 +345,8 @@ def main(argv=None):
                 if rest > 0:
                     time.sleep(rest)
     finally:
+        if decision is not None:
+            decision.close()  # RELEASE_ALL
         if writer is not None:
             writer.release()
         log_f.close()
