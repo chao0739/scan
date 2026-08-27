@@ -213,6 +213,13 @@ def main(argv=None):
     # ---- 控制（P5/P6）----
     ctl_cfg = dict(cfg.get("control") or {})
     ctl_mode = args.control or ctl_cfg.get("mode", "off")
+    # P7 巡逻端点按地图（=怪物模板集）存在 settings.yaml 的 patrol 段，这里取出当前这张的
+    pb = (cfg.get("patrol") or {}).get(monster) or {}
+    if pb.get("left_x") is not None and pb.get("right_x") is not None:
+        ctl_cfg["patrol_left_x"], ctl_cfg["patrol_right_x"] = pb["left_x"], pb["right_x"]
+        print(f"[ctl] 位置巡逻端点({monster}): left_x={pb['left_x']} right_x={pb['right_x']}")
+    else:
+        print(f"[ctl] {monster} 还没标定巡逻端点 -> 巡逻退回「按时间掉头」（菜单「标定巡逻端点」可标）")
     decision = None
     if ctl_mode in ("dry", "pico"):
         actuator = None
@@ -232,6 +239,7 @@ def main(argv=None):
 
     show = not args.no_show
     last_state = None
+    was_stuck = False
     frame_period = 1.0 / src.fps if args.realtime else 0
     try:
         while True:
@@ -245,6 +253,7 @@ def main(argv=None):
             t0 = time.perf_counter()
             game = rect(frame)
             rois = roi_provider.rois(game)
+            bg_dx = roi_provider.measure_scroll(game)   # 背景滚动量（P9 卡住检测：人不动+背景不动 才算卡）
             best = {"score": -1.0, "loc": None, "template": None, "raw": False, "color_dist": None, "edge_score": None, "verified": False}
             best_roi = None
             for name, (x1, y1, x2, y2) in rois:
@@ -259,8 +268,13 @@ def main(argv=None):
                 dist = abs((x1 + lx + lw / 2) - roi_provider.last_player[0])
             ctl_state = None
             if decision is not None:
+                px_now = roi_provider.last_player[0] if roi_provider.last_player else None
                 ctl_state = decision.update(roi_provider.last_player is not None and roi_provider.lost_frames == 0,
-                                            detected, best_roi[0] if best_roi else None, dist)
+                                            detected, best_roi[0] if best_roi else None, dist,
+                                            player_x=px_now, bg_dx=bg_dx)
+                if decision.stuck and not was_stuck:
+                    print(f"[ctl] STUCK #{decision.stuck_count}: 按着 {decision.held} 但 x={px_now} 不动、背景不滚（第 {src.frame_index} 帧）")
+                was_stuck = decision.stuck
                 roi_provider.set_facing_hint(decision.facing)
             latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -272,6 +286,8 @@ def main(argv=None):
                    "player": roi_provider.last_player, "player_score": round(roi_provider.player_score, 3),
                    "dist": None if dist is None else round(dist), "ctl": ctl_state,
                    "held": decision.held if decision else None,
+                   "patrol_target": decision.patrol_target if decision else None,
+                   "bg_dx": round(bg_dx, 1), "stuck": decision.stuck if decision else None,
                    "latency_ms": round(latency_ms, 2)}
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             if detected != last_state or src.frame_index % every_n == 0:
@@ -285,6 +301,15 @@ def main(argv=None):
                     cv2.drawMarker(vis, (px, py), (255, 0, 255), cv2.MARKER_CROSS, 20, 2)
                 for name, (x1, y1, x2, y2) in rois:
                     cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 255, 0), 1)
+                if decision is not None:
+                    pl, pr, ptol = decision.patrol_bounds()
+                    if pl is not None:
+                        for ex, lbl in ((pl, "L"), (pr, "R")):
+                            hot = decision.patrol_target == ("left" if lbl == "L" else "right")
+                            cv2.line(vis, (int(ex), 0), (int(ex), out_h), (0, 165, 255) if hot else (120, 120, 120),
+                                     2 if hot else 1)
+                            cv2.putText(vis, lbl, (int(ex) + 4, out_h - 10), 0, 0.7,
+                                        (0, 165, 255) if hot else (120, 120, 120), 2)
                 if best_roi and best["loc"]:
                     (x1, y1, _, _), (lx, ly, lw, lh) = best_roi[1], best["loc"]
                     color = (0, 255, 0) if best["raw"] else (0, 0, 255)
@@ -294,6 +319,11 @@ def main(argv=None):
                 cd = f" cd={best['color_dist']:.2f}" if best.get("color_dist") is not None else ""
                 cd += f" eg={best['edge_score']:.2f}" if best.get("edge_score") is not None else ""
                 ctl_txt = f" ctl={ctl_state}{'/' + decision.held if decision and decision.held else ''}" if decision else ""
+                if decision is not None and decision.patrol_target:
+                    ctl_txt += f"->{decision.patrol_target[0].upper()}"
+                if decision is not None and decision.stuck:
+                    ctl_txt += " STUCK"
+                    cv2.putText(vis, "STUCK", (out_w // 2 - 60, 70), 0, 1.4, (0, 0, 255), 3)
                 txt = (f"{state_txt}{side}{ctl_txt} score={best['score']:.2f}{cd} raw={int(best['raw'])} "
                        f"p={roi_provider.player_score:.2f} {latency_ms:.1f}ms fps={src.measured_fps:.1f} "
                        f"f={src.frame_index} face={roi_provider.current_facing} monster={monster}")

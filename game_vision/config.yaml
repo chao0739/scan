@@ -22,15 +22,22 @@ roi:
     local_threshold: 0.5       # 局部跟踪阈值
     track_window: 120          # 跟踪搜索窗口半径(px)
     lost_max: 5                # 连续丢失多少帧后全局重搜
+    # 中间层：小窗跟丢后先在上一位置 ±mid_window 内找，>=mid_threshold 就接受（位置连续性）。
+    # 屏幕边缘的真名牌只有 0.67~0.76，够不到全局阈值；假名牌分数与之重叠，只能靠位置区分。0 关闭。
+    mid_window: [300, 120]
+    mid_threshold: 0.72   # 录像回归扫出来的最低安全值：0.70/0.71 会锁到上一层平台上别人的名牌，0.72 起干净
     # 名牌匹配点（名牌左上角）到角色脚底中心的偏移
     anchor_dx: 23
     anchor_dy: 12
-  facing: auto         # auto | right | left | both  (auto=按玩家前进方向，未知时两侧)
+  facing: key          # key | auto | right | left | both
+                       # key  = 用决策按住的方向键定朝向（推荐：只检测前进方向，不会背对怪挥刀，ROI 减半）
+                       # auto = 按位移估计前进方向（原地转身不更新，弱点见 README）
   facing_auto:
     window: 10         # 累计最近 N 帧的世界位移
     min_move: 20       # 累计位移超过多少像素才切换朝向
     band: [0, 100, 1280, 600]   # 估计背景滚动用的画面带（避开 HUD）
     scale: 0.25
+  scroll_band: [0, 350, 1280, 650]   # 背景滚动量估计用的画面带（平台/树这一层；避开 HUD 和视差天空）
   near_offset: 20      # 从角色中心向前起算
   far_offset: 320
   up: 70               # 相对角色脚底向上。只覆盖同一层（地面攻击只打同层；蜗牛高约 40px）。
@@ -70,8 +77,17 @@ control:                 # P5/P6：检测结果 -> 按键（decision.py）
   attack_range_px: 130   # 怪离玩家多近才算进入攻击范围（矫正后画面像素）；更远则先接近
   approach: true         # 怪太远时按住方向键走过去
   patrol: true           # 没怪时来回巡逻；false=原地等
-  walk_max_ms: 3000      # 巡逻单方向最多走多久后掉头
+  # P7 位置巡逻：地图两端点（矫正后画面 x）。菜单「标定巡逻端点」按怪物名存进 settings.yaml 的 patrol 段，
+  # app.py 启动时按当前怪物取出来填到这里。两个都为 null 时退化成下面的「按时间掉头」。
+  patrol_left_x: null
+  patrol_right_x: null
+  patrol_tolerance: 30   # 玩家 x 进到端点这个范围内就算到端点，换朝另一端走
+  walk_max_ms: 3000      # 时间巡逻（未标端点时）单方向最多走多久后掉头
   turn_press_ms: 60      # 转身时方向键点按时长
+  # P9 卡住检测（只报警不动作）：按着方向键 stuck_ms 内 玩家 x 位移 <= stuck_move_px 且 背景滚动 <= stuck_scroll_px/帧
+  stuck_ms: 1500
+  stuck_move_px: 3
+  stuck_scroll_px: 1.5
   lost_release_frames: 10  # 玩家定位连续丢失多少帧后松开全部按键
   sync_interval_ms: 1000 # 定期重发期望按键状态（抗 UDP 丢包）
   start_dir: right

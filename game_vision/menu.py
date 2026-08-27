@@ -22,6 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import app  # noqa: E402
 from camera import FrameSource, open_writer, list_cameras  # noqa: E402
 from calibration import Rectifier, load_corners, run_calibration_ui  # noqa: E402
+from roi import ROIProvider  # noqa: E402
 import harvest_templates as hv  # noqa: E402
 import dedupe_templates as dd  # noqa: E402
 
@@ -484,6 +485,146 @@ def menu_settings():
         print("已保存")
 
 
+def patrol_bounds_of(monster):
+    """这张地图（=怪物模板集）已标定的巡逻端点 dict(left_x, right_x)，没有则 {}。"""
+    return (settings().get("patrol") or {}).get(monster) or {}
+
+
+def do_patrol_bounds():
+    """P7：现场标定这张地图的巡逻两端点（= 你想让角色掉头的位置，不必是地图边界）。
+    你手动把角色走到左掉头点按 l、右掉头点按 r（记下当时的玩家屏幕 x），按 s 保存。
+
+    屏幕 x 只有在「镜头被地图边界顶住」时才等于地图位置；镜头跟着人走时屏幕 x 恒在中间、记了也没用。
+    所以窗口里会实时显示 CAM: LOCKED / FOLLOWING（用背景相位相关判断背景有没有在滚），
+    只有 LOCKED 时记的点才可靠。"""
+    c = cfg()
+    m = c.get("monster", {}).get("current")
+    if not m:
+        print("请先在「怪物模板」里选一个怪物（端点按地图/怪物分别保存）")
+        return
+    if not os.path.exists(c["roi"]["player"]["template"]):
+        print("玩家名牌模板不存在，请先到「玩家设置」新增玩家（端点要靠玩家定位才能记）")
+        return
+    rect = rectifier()
+    if rect is None:
+        return
+    try:
+        src = open_source()
+    except Exception as e:
+        print("打开摄像头失败:", e)
+        return
+    out_w, out_h = c["screen"]["output_width"], c["screen"]["output_height"]
+    rp = ROIProvider(c["roi"], out_w, out_h)
+    b = dict(patrol_bounds_of(m))
+    print(f"标定巡逻端点（地图: {m}）")
+    print("  用你自己的键盘把角色走到你想让它**向右掉头**的位置，按 r 记录；走到**向左掉头**的位置，按 l 记录；按 s 保存")
+    print("  窗口顶部 CAM 状态：LOCKED=镜头被地图边界顶住，这里的屏幕 x 可靠，可以记；")
+    print("                    FOLLOWING=镜头正跟着人走，屏幕 x 不代表地图位置，这里记的点无效（先来回走两步让它判断）")
+    print("  （左右记反了也没关系，保存时会自动排序）q 取消")
+    band = (350, 650)                      # 背景滚动估计用的画面带（平台/树这一层，避开 HUD 和视差天空）
+    prev_small = None
+    hist = []                              # 最近 N 帧的 (玩家Δx, 背景dx)
+    prev_px = None
+    win = f"patrol bounds - {m}"
+    cv2.namedWindow(win)
+    saved = False
+    while True:
+        ok, f = src.read()
+        if not ok:
+            break
+        game = rect(f)
+        p = rp.locate_player(game)
+        px = None if p is None else int(p[0])
+        # 镜头是否被顶住：玩家在动而背景不动 -> LOCKED；背景在滚 -> FOLLOWING
+        small = cv2.resize(cv2.cvtColor(game[band[0]:band[1]], cv2.COLOR_BGR2GRAY), None, fx=0.25, fy=0.25,
+                           interpolation=cv2.INTER_AREA).astype("float32")
+        bg_dx = 0.0
+        if prev_small is not None:
+            (dx, _dy), resp = cv2.phaseCorrelate(prev_small, small)
+            bg_dx = dx * 4 if resp > 0.05 else 0.0
+        prev_small = small
+        hist.append((0 if (px is None or prev_px is None) else px - prev_px, bg_dx))
+        hist = hist[-12:]
+        prev_px = px
+        moved = sum(abs(a) for a, _ in hist)
+        scrolled = sum(abs(d) for _, d in hist)
+        if scrolled > 6:
+            cam = "FOLLOWING (x unreliable here!)"
+        elif moved > 15:
+            cam = "LOCKED (ok)"
+        else:
+            cam = "? walk a bit to test"
+        vis = game.copy()
+        if p is not None:
+            cv2.drawMarker(vis, (int(p[0]), int(p[1])), (255, 0, 255), cv2.MARKER_CROSS, 20, 2)
+        for key, color in (("left_x", (0, 165, 255)), ("right_x", (0, 255, 0))):
+            if b.get(key) is not None:
+                x = int(b[key])
+                cv2.line(vis, (x, 0), (x, out_h), color, 2)
+                cv2.putText(vis, key[0].upper(), (x + 4, out_h - 10), 0, 0.7, color, 2)
+        # OpenCV 自带字体不支持中文，窗口内提示只能用英文
+        txt = (f"player_x={px if px is not None else '--'} score={rp.player_score:.2f} | CAM: {cam} | "
+               f"L={b.get('left_x')} R={b.get('right_x')} | l/r=set  s=save  q=cancel")
+        cv2.rectangle(vis, (0, 0), (out_w, 26), (0, 0, 0), -1)
+        cv2.putText(vis, txt, (6, 18), 0, 0.5, (0, 0, 255) if cam.startswith("FOLLOWING") else (0, 255, 255), 1)
+        cv2.imshow(win, vis)
+        k = cv2.waitKey(20) & 0xFF
+        if k in (ord("q"), 27):
+            break
+        elif k in (ord("l"), ord("r")):
+            if px is None:
+                print("[!] 这一帧没定位到玩家（名牌被挡/爬梯时会这样），走两步再按")
+            else:
+                b["left_x" if k == ord("l") else "right_x"] = px
+                print(f"记录 {'左' if k == ord('l') else '右'}端点 x={px}   CAM: {cam}")
+                if cam.startswith("FOLLOWING"):
+                    print("    [!] 镜头正在跟随，这个位置的屏幕 x 不代表地图位置，巡逻时可能永远到不了这个端点。"
+                          "建议换到镜头被顶住(LOCKED)的位置再记")
+        elif k in (ord("s"), 13, 10):
+            if b.get("left_x") is None or b.get("right_x") is None:
+                print("[s] 还差一个端点：左端按 l、右端按 r")
+            elif abs(b["left_x"] - b["right_x"]) < 100:
+                print(f"[s] 两个端点只差 {abs(b['left_x'] - b['right_x'])} px，太近了，是不是记到同一个地方了？")
+            else:
+                lo, hi = sorted((b["left_x"], b["right_x"]))
+                st = settings()
+                st.setdefault("patrol", {})[m] = {"left_x": int(lo), "right_x": int(hi)}
+                app.save_settings(st)
+                print(f"已保存 {m} 的巡逻端点: left_x={lo} right_x={hi}")
+                saved = True
+                break
+        elif k != 255:
+            print(f"[key] 收到按键码 {k}（不是 l/r/s/q）")
+    src.release()
+    cv2.destroyWindow(win)
+    if not saved:
+        print("已取消（未保存）")
+
+
+def do_patrol_clear():
+    m = cfg().get("monster", {}).get("current")
+    st = settings()
+    if m and (st.get("patrol") or {}).pop(m, None) is not None:
+        app.save_settings(st)
+        print(f"已清除 {m} 的巡逻端点，巡逻回到「按时间掉头」")
+    else:
+        print("当前地图本来就没有标定端点")
+
+
+def menu_patrol():
+    while True:
+        m = cfg().get("monster", {}).get("current") or "(未选怪物)"
+        b = patrol_bounds_of(m)
+        cur = f"L={b['left_x']} R={b['right_x']}" if b else "未标定（巡逻按时间掉头）"
+        act = choose(f"巡逻端点  地图: {m}  当前: {cur}", [
+            ("标定端点（走到左端按 l / 右端按 r / s 保存）", do_patrol_bounds),
+            ("清除本地图的端点", do_patrol_clear),
+        ])
+        if act is None:
+            return
+        act()
+
+
 def do_run():
     c = cfg()
     m = c.get("monster", {}).get("current")
@@ -521,11 +662,13 @@ def main():
         c = cfg()
         status = (f"摄像头={c['camera']['source']}  玩家={c.get('player', {}).get('current', '未设置')}  "
                   f"怪物={c.get('monster', {}).get('current', '未设置')}  朝向={c['roi']['facing']}  "
-                  f"标定={'已' if load_corners(c['screen']['calibration_file']) is not None else '未'}")
+                  f"标定={'已' if load_corners(c['screen']['calibration_file']) is not None else '未'}  "
+                  f"端点={'已' if patrol_bounds_of(c.get('monster', {}).get('current')) else '未'}")
         act = choose("游戏目标检测  " + status, [
             ("开始检测", do_run),
             ("标定屏幕四角（首次 / 摄像头挪动后）", do_calibrate),
             ("玩家设置", menu_player),
+            ("巡逻端点（走到地图两端记录，P7 位置巡逻）", menu_patrol),
             ("怪物模板", menu_monster),
             ("设置（摄像头 / 朝向 / 阈值）", menu_settings),
             ("复盘上次运行（日志叠加到录像）", do_review),

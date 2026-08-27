@@ -6,7 +6,11 @@
 策略 v1（参数全部在 config.yaml 的 control 段）：
   有怪：朝向不对 -> 点一下方向键转身；距离 > attack_range_px -> 按住方向键接近；否则按 attack_interval_ms 节奏按攻击键，
         拾取键 pickup_key（z）：控制期间每隔 pickup_interval_ms=[min,max] 内随机的时间点按一次，与状态无关
-  没怪：按住方向键巡逻，走 walk_max_ms 没遇到怪就掉头（patrol=false 则原地等待）
+  没怪：巡逻（patrol=false 则原地等待）。两种模式：
+        位置巡逻(P7)——设了 patrol_left_x/right_x 时，按住方向键朝目标端点走，玩家 x 进到端点 tolerance 内就换另一端；
+        时间巡逻——没设端点时退化为原来的「走 walk_max_ms 后掉头」
+P9 卡住检测（只报警，不动作）：按着方向键 stuck_ms 内玩家屏幕 x 没动(<=stuck_move_px) 且背景没滚(<=stuck_scroll_px)
+  -> self.stuck=True（日志 stuck 字段 / 画面 STUCK）。镜头跟随时人不动但背景在滚，不算卡住；没按方向键不算卡住。
 安全：
   暂停(p) / 玩家丢失 lost_release_frames 帧 -> 松开全部按键
   每 sync_interval_ms 重发一次期望的按键状态（UDP 丢包导致的卡键最多持续这么久）
@@ -72,6 +76,8 @@ DEFAULTS = dict(attack_key="ctrl", attack_press_ms=60, attack_interval_ms=700, a
                 pickup_key="z", pickup_press_ms=60, pickup_interval_ms=(500, 1000),
                 range_hysteresis_px=40, attack_linger_ms=800,
                 approach=True, patrol=True, walk_max_ms=3000, turn_press_ms=60,
+                patrol_left_x=None, patrol_right_x=None, patrol_tolerance=30,
+                stuck_ms=1500, stuck_move_px=3, stuck_scroll_px=1.5,
                 lost_release_frames=10, sync_interval_ms=1000, start_dir="right")
 
 
@@ -87,6 +93,11 @@ class Decision:
         self.held = None                  # 当前按住的方向键：None / "left" / "right"
         self.next_pickup = 0.0            # 下次按拾取键的时间
         self.walk_start = None
+        self.patrol_target = None         # 位置巡逻当前朝哪个端点走："left"/"right"/None(未设端点)
+        self.stuck = False                # P9：按着方向键但人和背景都没动
+        self.stuck_count = 0              # 进入卡住状态的次数（日志/验收用）
+        self._still_since = None          # 上次「有位移」的时间
+        self._still_x = None
         self.last_attack = 0.0
         self.last_seen = None            # (time, side) 最近一次看到怪
         self.lost_frames = 0
@@ -124,6 +135,48 @@ class Decision:
             lo, hi = self.c["pickup_interval_ms"]
             self.next_pickup = now + random.uniform(lo, hi) / 1000
 
+    def patrol_bounds(self):
+        """返回 (left_x, right_x, tolerance)；没设端点则 (None, None, tol)。左右写反了也认。"""
+        l, r = self.c["patrol_left_x"], self.c["patrol_right_x"]
+        if l is None or r is None:
+            return None, None, self.c["patrol_tolerance"]
+        l, r = float(min(l, r)), float(max(l, r))
+        return l, r, self.c["patrol_tolerance"]
+
+    def _patrol(self, now, player_x):
+        """P7 位置巡逻：朝当前目标端点走，进到端点 tolerance 内就换另一端。
+        端点未标定（或这一帧不知道 player_x）时退回原来的「走 walk_max_ms 后掉头」。"""
+        l, r, tol = self.patrol_bounds()
+        if l is None or player_x is None:
+            self.patrol_target = None
+            if self.held is None:
+                self._hold(self.facing or self.c["start_dir"], now)
+            elif (now - self.walk_start) * 1000 >= self.c["walk_max_ms"]:
+                self._hold("left" if self.held == "right" else "right", now)
+            return
+        if self.patrol_target is None:                      # 第一帧：朝更远的那一端走
+            self.patrol_target = "left" if abs(player_x - l) > abs(player_x - r) else "right"
+        # 只在「到达目标端」时翻转，所以坐标抖动不会来回换向（另一端还远着）
+        if self.patrol_target == "right" and player_x >= r - tol:
+            self.patrol_target = "left"
+        elif self.patrol_target == "left" and player_x <= l + tol:
+            self.patrol_target = "right"
+        self._hold(self.patrol_target, now)
+
+    def _update_stuck(self, now, player_x, bg_dx):
+        """P9：只判定、只报警。"""
+        c = self.c
+        if self.held is None or player_x is None:
+            self._still_since, self._still_x, self.stuck = None, None, False
+            return
+        if (self._still_x is None or abs(player_x - self._still_x) > c["stuck_move_px"]
+                or abs(bg_dx) > c["stuck_scroll_px"]):
+            self._still_since, self._still_x = now, player_x   # 人动了 或 镜头在滚 -> 重新计时
+        was = self.stuck
+        self.stuck = (now - self._still_since) * 1000 >= c["stuck_ms"]
+        if self.stuck and not was:
+            self.stuck_count += 1
+
     def set_paused(self, paused):
         self.paused = paused
         if paused:
@@ -131,8 +184,9 @@ class Decision:
             self.state = "PAUSED"
 
     # ---- 主入口 ----
-    def update(self, player_found, detected, side, dist, now=None):
-        """返回本帧的状态名。side: 'left'/'right'/None；dist: 怪到玩家的水平像素距离（未知给 None）。"""
+    def update(self, player_found, detected, side, dist, now=None, player_x=None, bg_dx=0.0):
+        """返回本帧的状态名。side: 'left'/'right'/None；dist: 怪到玩家的水平像素距离（未知给 None）；
+        player_x: 玩家在矫正后画面里的 x（位置巡逻用；给 None 则退回时间巡逻）；bg_dx: 本帧背景滚动量(px)。"""
         now = time.monotonic() if now is None else now
         c = self.c
         if self.paused:
@@ -144,6 +198,7 @@ class Decision:
             if self.lost_frames >= c["lost_release_frames"] and (self.held is not None or self.state != "LOST"):
                 self.release_all()
                 self.state = "LOST"
+            self._update_stuck(now, None, bg_dx)
             return self.state
         self.lost_frames = 0
         self._maybe_pickup(now)
@@ -171,15 +226,13 @@ class Decision:
                 self.state = "ATTACK"
         else:
             if c["patrol"]:
-                if self.held is None:
-                    self._hold(self.facing or c["start_dir"], now)
-                elif (now - self.walk_start) * 1000 >= c["walk_max_ms"]:
-                    other = "left" if self.held == "right" else "right"
-                    self._hold(other, now)
+                self._patrol(now, player_x)
                 self.state = "PATROL"
             else:
                 self._release_dir()
                 self.state = "IDLE"
+
+        self._update_stuck(now, player_x, bg_dx)
 
         # 定期同步按键状态：防止 UDP 丢包造成的卡键/漏按
         if (now - self.last_sync) * 1000 >= c["sync_interval_ms"]:
@@ -187,6 +240,8 @@ class Decision:
             if self.held is None:
                 self.act.release_all()   # 清掉可能卡住的键
             else:
+                # 先补发对侧 KEY_UP：万一换向时的 KEY_UP 丢包，Pico 会同时按着左右（P8 验收项），最多持续到这里
+                self.act.key_up("left" if self.held == "right" else "right")
                 self.act.key_down(self.held)
         return self.state
 
