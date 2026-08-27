@@ -39,6 +39,16 @@ roi:
     band: [0, 100, 1280, 600]   # 估计背景滚动用的画面带（避开 HUD）
     scale: 0.25
   scroll_band: [0, 350, 1280, 650]   # 背景滚动量估计用的画面带（平台/树这一层；避开 HUD 和视差天空）
+  world:                 # 地图 x 估计（worldpos.py）：屏幕 x + 累加的镜头位移；地标校准防漂移
+    enabled: true
+    deadband: 1.0        # |bg_dx| 小于此值视为噪声不累加（静止噪声 ±0.3，真实滚动 3~5/帧）
+    lock_frames: 20      # 「人在走、背景不滚」持续这么多帧且人贴近屏幕边缘 -> 到了地图边界，归零/校 cam_w
+    move_px: 50
+    scroll_px: 6
+    landmark_thr: 0.9    # 地标匹配分下限（录像回放里真匹配中位 0.94，错配到相邻瓦片的 0.80~0.87）
+    fix_every: 5         # 每几帧找一次地标
+    landmark_box: [150, 250, 100]   # 标端点时抠地标的范围：玩家 x±150，y 从脚底上方 250 到上方 100（避开人物和地面怪）
+    # 实际由 worldpos.pick_landmark 在几个候选框里挑「最不像相邻瓦片」的一块，这里只是第一个候选
   near_offset: 20      # 从角色中心向前起算
   far_offset: 320
   up: 70               # 相对角色脚底向上。只覆盖同一层（地面攻击只打同层；蜗牛高约 40px）。
@@ -82,6 +92,7 @@ control:                 # P5/P6：检测结果 -> 按键（decision.py）
   # app.py 启动时按当前怪物取出来填到这里。两个都为 null 时退化成下面的「按时间掉头」。
   patrol_left_x: null
   patrol_right_x: null
+  patrol_seek: true      # 地图坐标模式下还没被地标/边界校准过时：一直朝一个方向走去找地标（卡住则由 P10 掉头），而不是按时间掉头
   patrol_tolerance: 50   # 玩家 x 进到端点这个范围内就算到端点，换朝另一端走。含换向延迟造成的越过量：
                          # 走速 ≈105 px/s × (KEY_UP+KEY_DOWN 两拍 120 ms + 游戏响应) ≈ 40 px，真机实测越过 ~55 px
   walk_max_ms: 3000      # 时间巡逻（未标端点时）单方向最多走多久后掉头

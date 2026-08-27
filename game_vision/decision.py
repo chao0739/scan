@@ -83,7 +83,7 @@ DEFAULTS = dict(attack_key="ctrl", attack_press_ms=60, attack_interval_ms=700, a
                 pickup_key="z", pickup_press_ms=60, pickup_interval_ms=(500, 1000),
                 range_hysteresis_px=40, attack_linger_ms=800,
                 approach=True, patrol=True, walk_max_ms=3000, turn_press_ms=60,
-                patrol_left_x=None, patrol_right_x=None, patrol_tolerance=30,
+                patrol_left_x=None, patrol_right_x=None, patrol_tolerance=30, patrol_seek=True,
                 stuck_ms=1500, stuck_move_px=3, stuck_scroll_px=1.5,
                 jump_on_stuck=False, jump_key="alt", jump_press_ms=80, jump_recover_ms=900, jump_max_retry=3,
                 jump_clear_px=40, giveup_walk_ms=4000,
@@ -167,6 +167,8 @@ class Decision:
             self.patrol_target = None
             if self.held is None:
                 self._hold(self.facing or self.c["start_dir"], now)
+            elif l is not None and self.c["patrol_seek"]:
+                pass    # 端点已标但当前位置未知（地图坐标还没校准）：一直走，直到找到地标；卡住由 P10 掉头
             elif (now - self.walk_start) * 1000 >= self.c["walk_max_ms"]:
                 self._hold("left" if self.held == "right" else "right", now)
             return

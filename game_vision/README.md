@@ -23,6 +23,8 @@ python menu.py
 5. **巡逻端点**（P7 位置巡逻）：用你自己的键盘把角色走到想让它掉头的左位置按 `l`、右位置按 `r`、`s` 保存。
    窗口顶部 `CAM: LOCKED` 表示镜头被地图边界顶住、这里的屏幕 x 可靠；`FOLLOWING` 表示镜头在跟随、此处记的点无效。
    端点按怪物名存在 `settings.yaml` 的 `patrol` 段；没标端点时巡逻退化为「走 walk_max_ms 后掉头」。
+   保存后若两端都抠到了地标，会问用哪种坐标：**屏幕坐标**（简单可靠，要求端点在镜头被顶住处）或
+   **地图坐标**（`worldpos.py` 靠地标校准，端点可在任意位置，包括镜头跟随区）。可在「巡逻端点→切换坐标模式」改。
 6. **开始检测**
 
 以后日常只需 `python menu.py` → `1`。换地图：怪物模板 → 新建/选择怪物 → 采模板。换号：玩家设置 → 新增/切换。
@@ -63,6 +65,7 @@ python menu.py
 | camera | source / width / height | 摄像头编号 / 名称关键字（如 `Insta360`）/ 视频路径；建议 1080p 采集 |
 | screen | output_width/height | 矫正后虚拟游戏画面尺寸（**模板尺寸与其绑定**，改了要重抠模板） |
 | roi.player | template / match_threshold / local_threshold / track_window / mid_window / mid_threshold | 用玩家名牌定位玩家：小窗跟踪(±120) → 丢了先在上一位置 ±mid_window 内找(≥mid_threshold 0.72，靠位置连续性认边缘处的低分真名牌) → 再全局搜(≥match_threshold 0.82) |
+| roi.world | enabled / deadband / lock_frames / landmark_thr / fix_every / landmark_box | 地图 x 估计（`worldpos.py`）：屏幕 x + 累加镜头位移(bg_dx)，靠地图边界归零或地标匹配防漂移。端点标定时会自动抠地标 |
 | roi | facing / near_offset / far_offset / up / down / scroll_band | 玩家前方 ROI（up/down 只覆盖同一层，默认 70/20）。`facing`: **`key`**(用决策按住的方向键定朝向，只检测前进方向，推荐) / `auto`(按位移估计) / `right` / `left` / `both`。far_offset 现为 140（攻击区，不追怪）。scroll_band 是估计背景滚动量的画面带 |
 | roi.facing_auto | window / min_move | 前进方向判定：累计最近 N 帧的“角色屏幕位移 − 背景滚动位移”，超过 min_move 像素才切换方向 |
 | detection | threshold / color_verify.max_dist / edge_min / topk / flip | 模板分阈值（开校验后 0.55）；候选框颜色直方图距离上限 0.48；边缘图匹配下限 0.4；每模板检查的峰数；flip 自动加水平翻转模板 |

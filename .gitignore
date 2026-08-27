@@ -12,3 +12,4 @@ game_vision/settings.yaml
 
 # 模板去重工具移出的近似重复模板（可用工具移回）
 game_vision/templates/*/_dup/
+game_vision/calibration/landmarks/

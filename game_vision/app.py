@@ -28,6 +28,7 @@ from debounce import Debouncer
 from detector import TemplateDetector
 from roi import ROIProvider
 from decision import Decision, DryRunActuator, PicoActuator
+from worldpos import WorldTracker
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_ROOT = "templates"
@@ -257,12 +258,32 @@ def main(argv=None):
     # ---- 控制（P5/P6）----
     ctl_cfg = dict(cfg.get("control") or {})
     ctl_mode = args.control or ctl_cfg.get("mode", "off")
-    # P7 巡逻端点按地图（=怪物模板集）存在 settings.yaml 的 patrol 段，这里取出当前这张的
+    # 地图 x 估计（worldpos.py）+ 本地图的地标
+    wcfg = cfg["roi"].get("world") or {}
     pb = (cfg.get("patrol") or {}).get(monster) or {}
-    if pb.get("left_x") is not None and pb.get("right_x") is not None:
+    patrol_mode = pb.get("mode", "screen")
+    tracker = None
+    if wcfg.get("enabled", True):
+        tracker = WorldTracker(out_w, wcfg.get("lock_frames", 20), wcfg.get("move_px", 50), wcfg.get("scroll_px", 6),
+                               cam_w=pb.get("cam_w"), deadband=wcfg.get("deadband", 1.0))
+        for lm in pb.get("landmarks") or []:
+            g = cv2.imread(lm["file"], cv2.IMREAD_GRAYSCALE)
+            if g is None:
+                print(f"[world] 地标文件不存在: {lm['file']}")
+                continue
+            tracker.add_landmark(lm["name"], g, lm["world_x"], lm["y"], wcfg.get("landmark_thr", 0.8))
+        print(f"[world] 地图坐标估计已开，地标 {len(tracker.landmarks)} 个")
+    # P7 巡逻端点按地图（=怪物模板集）存在 settings.yaml 的 patrol 段，这里取出当前这张的
+    if patrol_mode == "world" and pb.get("left_wx") is not None and pb.get("right_wx") is not None and tracker is not None:
+        ctl_cfg["patrol_left_x"], ctl_cfg["patrol_right_x"] = pb["left_wx"], pb["right_wx"]
+        print(f"[ctl] 位置巡逻端点({monster}, 地图坐标): left_wx={pb['left_wx']} right_wx={pb['right_wx']}"
+              f"（先朝 {ctl_cfg.get('start_dir', 'right')} 走找地标）")
+    elif pb.get("left_x") is not None and pb.get("right_x") is not None:
+        patrol_mode = "screen"
         ctl_cfg["patrol_left_x"], ctl_cfg["patrol_right_x"] = pb["left_x"], pb["right_x"]
-        print(f"[ctl] 位置巡逻端点({monster}): left_x={pb['left_x']} right_x={pb['right_x']}")
+        print(f"[ctl] 位置巡逻端点({monster}, 屏幕坐标): left_x={pb['left_x']} right_x={pb['right_x']}")
     else:
+        patrol_mode = "screen"
         print(f"[ctl] {monster} 还没标定巡逻端点 -> 巡逻退回「按时间掉头」（菜单「标定巡逻端点」可标）")
     decision = None
     if ctl_mode in ("dry", "pico"):
@@ -308,6 +329,14 @@ def main(argv=None):
             game = rect(frame)
             rois = roi_provider.rois(game)
             bg_dx = roi_provider.measure_scroll(game)   # 背景滚动量（P9 卡住检测：人不动+背景不动 才算卡）
+            world_x = lm_fix = None
+            if tracker is not None:
+                px_t = roi_provider.last_player[0] if (roi_provider.last_player and roi_provider.lost_frames == 0) else None
+                world_x = tracker.update(px_t, bg_dx)
+                if tracker.landmarks and src.frame_index % max(1, wcfg.get("fix_every", 5)) == 0:
+                    lm_fix = tracker.fix_with_landmarks(cv2.cvtColor(game, cv2.COLOR_BGR2GRAY))
+                    if lm_fix is not None:
+                        world_x = tracker.world_x
             best = {"score": -1.0, "loc": None, "template": None, "raw": False, "color_dist": None, "edge_score": None, "verified": False}
             best_roi = None
             for name, (x1, y1, x2, y2) in rois:
@@ -323,9 +352,14 @@ def main(argv=None):
             ctl_state = None
             if decision is not None:
                 px_now = roi_provider.last_player[0] if roi_provider.last_player else None
+                if patrol_mode == "world":
+                    # 地图坐标模式：校准过才把位置交给巡逻逻辑；没校准前给 None -> 一直走去找地标
+                    x_for_patrol = world_x if (tracker is not None and tracker.localized) else None
+                else:
+                    x_for_patrol = px_now
                 ctl_state = decision.update(roi_provider.last_player is not None and roi_provider.lost_frames == 0,
                                             detected, best_roi[0] if best_roi else None, dist,
-                                            player_x=px_now, bg_dx=bg_dx)
+                                            player_x=x_for_patrol, bg_dx=bg_dx)
                 if decision.stuck and not was_stuck:
                     print(f"[ctl] STUCK #{decision.stuck_count}: 按着 {decision.held} 但 x={px_now} 不动、背景不滚（第 {src.frame_index} 帧）")
                 was_stuck = decision.stuck
@@ -342,6 +376,8 @@ def main(argv=None):
                    "held": decision.held if decision else None,
                    "patrol_target": decision.patrol_target if decision else None,
                    "bg_dx": round(bg_dx, 1), "stuck": decision.stuck if decision else None,
+                   "world_x": None if world_x is None else round(world_x), "cam_x": None if tracker is None else round(tracker.cam_x),
+                   "lm_fix": lm_fix, "localized": tracker.localized if tracker else None,
                    "cmds": (decision.act.frame_cmds[:] or None) if decision else None,
                    "latency_ms": round(latency_ms, 2)}
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -360,6 +396,8 @@ def main(argv=None):
                     cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 255, 0), 1)
                 if decision is not None:
                     pl, pr, ptol = decision.patrol_bounds()
+                    if pl is not None and patrol_mode == "world" and tracker is not None:
+                        pl, pr = pl - tracker.cam_x, pr - tracker.cam_x     # 地图坐标 -> 当前屏幕位置
                     if pl is not None:
                         for ex, lbl in ((pl, "L"), (pr, "R")):
                             hot = decision.patrol_target == ("left" if lbl == "L" else "right")
@@ -378,6 +416,8 @@ def main(argv=None):
                 ctl_txt = f" ctl={ctl_state}{'/' + decision.held if decision and decision.held else ''}" if decision else ""
                 if decision is not None and decision.patrol_target:
                     ctl_txt += f"->{decision.patrol_target[0].upper()}"
+                if tracker is not None:
+                    ctl_txt += f" wx={'?' if world_x is None else int(world_x)}{'' if tracker.localized else '(未校准)'}"
                 if decision is not None and decision.stuck:
                     ctl_txt += " STUCK"
                     cv2.putText(vis, "STUCK", (out_w // 2 - 60, 70), 0, 1.4, (0, 0, 255), 3)
