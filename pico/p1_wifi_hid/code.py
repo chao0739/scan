@@ -12,6 +12,11 @@
 #   RELEASE_ALL             释放全部按键和鼠标键
 #
 # 安全：超过 TIMEOUT_MS 没收到任何包 -> 自动 RELEASE_ALL（LED 快闪提示）。
+#
+# v2（2026-08-27，A 端真机实测后改）：v1 每圈只收 1 个包、KEY_PRESS 期间 sleep 不收包、每圈查一次 Wi-Fi 状态，
+#   结果连发 2 个包只能收到 1 个、5 个连发全丢。v2：每圈把待收的包全部收完；KEY_PRESS 改成定时释放不阻塞；
+#   Wi-Fi 状态每 1 s 查一次；socket 超时 5 ms。协议不变。A 端 pico_client 仍按 ≥60 ms 节拍发包（两边都留余量）。
+#   **改了固件要重新把本文件拷到 CIRCUITPY 盘**（当前 Pico 上烧的是 v1 还是 v2 看串口启动打印的版本号）。
 # LED：快闪=连 Wi-Fi 中；常亮=就绪；收到命令时短灭一下；超时保护中=慢闪。
 #
 # Wi-Fi 帐号密码写在 CIRCUITPY 盘根目录的 settings.toml（见 settings.toml.example）。
@@ -27,6 +32,7 @@ from adafruit_hid.keyboard import Keyboard
 from adafruit_hid.keycode import Keycode
 from adafruit_hid.mouse import Mouse
 
+VERSION = "p1-v2"
 PORT = int(os.getenv("PICO_PORT", "5000"))
 TIMEOUT_MS = int(os.getenv("PICO_TIMEOUT_MS", "1500"))
 
@@ -54,9 +60,26 @@ for i in range(1, 13):
     KEYS[f"f{i}"] = Keycode.F1 + i - 1
 
 
+pending_release = []   # [(release_at_monotonic, keycode)]：KEY_PRESS 的定时释放（不阻塞收包）
+
+
 def release_all():
+    pending_release.clear()
     kbd.release_all()
     mouse.release_all()
+
+
+def service_pending(now):
+    """到点的 KEY_PRESS 释放。"""
+    if not pending_release:
+        return
+    keep = []
+    for t, code in pending_release:
+        if now >= t:
+            kbd.release(code)
+        else:
+            keep.append((t, code))
+    pending_release[:] = keep
 
 
 def clamp8(v):
@@ -74,7 +97,7 @@ def mouse_move(dx, dy):
 def handle(cmd, parts):
     """返回回复字符串或 None。未知命令/参数错误抛 ValueError。"""
     if cmd == "PING":
-        return "PONG pico2w"
+        return "PONG pico2w " + VERSION
     if cmd == "RELEASE_ALL":
         release_all()
         return "OK"
@@ -89,8 +112,7 @@ def handle(cmd, parts):
         else:
             ms = int(parts[2]) if len(parts) > 2 else 50
             kbd.press(code)
-            time.sleep(min(ms, 2000) / 1000)
-            kbd.release(code)
+            pending_release.append((time.monotonic() + min(ms, 2000) / 1000, code))   # 定时释放，期间继续收包
         return "OK"
     if cmd == "MOUSE_MOVE":
         mouse_move(int(parts[1]), int(parts[2]))
@@ -136,25 +158,27 @@ print("IP:", wifi.radio.ipv4_address)
 pool = socketpool.SocketPool(wifi.radio)
 sock = pool.socket(pool.AF_INET, pool.SOCK_DGRAM)
 sock.bind(("0.0.0.0", PORT))
-sock.settimeout(0.05)
+sock.settimeout(0.005)
 led.value = True
-print("listening UDP", PORT)
+print("listening UDP", PORT, VERSION)
 
 buf = bytearray(256)
 last_rx = time.monotonic()
 safe_released = False
+last_wifi_check = time.monotonic()
 
 while True:
-    try:
-        n, addr = sock.recvfrom_into(buf)
-    except OSError:          # 超时无包
-        n, addr = 0, None
     now = time.monotonic()
-
-    if n:
-        last_rx = now
-        safe_released = False
-        led.value = False    # 收包时短灭
+    # 把这一圈里能收的包全收完（v1 每圈只收 1 个，连发的包会丢）
+    got_any = False
+    for _ in range(8):
+        try:
+            n, addr = sock.recvfrom_into(buf)
+        except OSError:          # 超时无包
+            break
+        if not n:
+            break
+        got_any = True
         try:
             line = bytes(buf[:n]).decode("utf-8").strip()
             parts = line.split()
@@ -168,7 +192,13 @@ while True:
                 sock.sendto(("ERR " + str(e)).encode(), addr)
             except Exception:
                 pass
+    if got_any:
+        last_rx = now
+        safe_released = False
+        led.value = False    # 收包时短灭
+    else:
         led.value = True
+    service_pending(now)
 
     # ---- 心跳超时保护 ----
     if not safe_released and (now - last_rx) * 1000 > TIMEOUT_MS:
@@ -178,6 +208,9 @@ while True:
     if safe_released:        # 保护状态：慢闪
         led.value = (int(now * 2) % 2) == 0
 
+    if now - last_wifi_check < 1.0:   # Wi-Fi 状态每秒查一次（每圈查会拖慢收包）
+        continue
+    last_wifi_check = now
     if not wifi.radio.connected:   # Wi-Fi 掉线：释放并重连
         release_all()
         print("wifi lost, reconnecting")

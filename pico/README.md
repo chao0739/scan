@@ -84,6 +84,14 @@ MOUSE_SCROLL <n>          正=向上
 RELEASE_ALL
 ```
 
+### P1 v2（2026-08-27）—— 需要重新烧录
+真机实测发现 v1 固件**每圈只收一个 UDP 包、KEY_PRESS 期间 sleep 不收包**：连发 2 个包只收到 1 个，5 个连发一个都收不到。
+A 端 bot 换向时发 `KEY_UP + KEY_DOWN`，后一个必丢，表现为角色"卡住"/走走停停/背对怪。
+- A 端已改：`pico_client.py` 所有控制命令进队列按 ≥60 ms 节拍单发（对 v1 固件也有效，已真机验证）。
+- 固件 v2（本目录 `p1_wifi_hid/code.py`）：每圈收完全部待收包、KEY_PRESS 定时释放不阻塞、Wi-Fi 状态每秒查一次。协议不变。
+  烧录：把 `code.py` 拷到 CIRCUITPY 盘覆盖即可；`PING` 回复带版本号 `PONG pico2w p1-v2` 可确认。
+  烧完可用 `python -c "from pico_client import *; ..."` 或交互模式连发几个 PING 验证不丢包。
+
 ### 卡键验证方法（重要）
 交互模式里输入 `KEY_DOWN w`（此时记事本会持续出 w），然后直接关掉命令行窗口——
 1.5 秒内应停止出字（Pico 超时自动 RELEASE_ALL）。这是规格 §6.2 的核心安全要求。

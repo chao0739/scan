@@ -446,11 +446,12 @@ def menu_settings():
         c = cfg()
         act = choose("设置", [
             (f"摄像头      当前: {c['camera']['source']}", "cam"),
-            (f"朝向模式    当前: {c['roi']['facing']}  (auto=按前进方向 / left / right / both)", "facing"),
+            (f"朝向模式    当前: {c['roi']['facing']}  (key=按方向键,推荐 / auto / left / right / both)", "facing"),
             (f"匹配阈值    当前: {c['detection']['threshold']}", "thr"),
             (f"ROI 前方距离 当前: {c['roi']['near_offset']}~{c['roi']['far_offset']} px", "roi"),
             (f"控制模式    当前: {c.get('control', {}).get('mode', 'off')}  (off=只检测 / dry=只打日志 / pico=真按键)", "ctl"),
             (f"攻击键/拾取键/间隔 当前: {c.get('control', {}).get('attack_key')} / {c.get('control', {}).get('pickup_key')} / {c.get('control', {}).get('attack_interval_ms')} ms", "atk"),
+            (f"卡住后跳跃恢复 当前: {'开' if c.get('control', {}).get('jump_on_stuck') else '关'}  (卡住 1.5s -> 按着方向键跳; 连跳 3 次无效 -> 掉头)", "jump"),
         ])
         if act is None:
             return
@@ -460,7 +461,8 @@ def menu_settings():
             v = ask("摄像头编号，或名称关键字（如 Insta360，编号变了也能找到）", c["camera"]["source"])
             set_setting("camera.source", int(v) if str(v).isdigit() else v)
         elif act == "facing":
-            v = choose("朝向模式", [("auto（按前进方向）", "auto"), ("right", "right"), ("left", "left"), ("both（两侧）", "both")])
+            v = choose("朝向模式", [("key（用决策按住的方向键，只检测前进方向，推荐）", "key"), ("auto（按位移估计前进方向）", "auto"),
+                                 ("right", "right"), ("left", "left"), ("both（两侧，耗时翻倍）", "both")])
             if v:
                 set_setting("roi.facing", v)
         elif act == "thr":
@@ -477,6 +479,12 @@ def menu_settings():
             set_setting("control.attack_key", str(k))
             set_setting("control.pickup_key", None if str(pk).lower() in ("none", "no", "") else str(pk))
             set_setting("control.attack_interval_ms", int(ms))
+        elif act == "jump":
+            v = choose("卡住后跳跃恢复", [("开", True), ("关（只在日志/画面里报 STUCK）", False)])
+            if v is not None:
+                set_setting("control.jump_on_stuck", v)
+                k = ask("跳跃键（Pico 键名）", c.get("control", {}).get("jump_key", "alt"))
+                set_setting("control.jump_key", str(k))
         elif act == "roi":
             a = ask("近端(px)", c["roi"]["near_offset"])
             b = ask("远端(px)", c["roi"]["far_offset"])

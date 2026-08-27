@@ -9,3 +9,6 @@ game_vision/__pycache__/
 **/__pycache__/
 # 本机用户设置（含个人选择，不共享）
 game_vision/settings.yaml
+
+# 模板去重工具移出的近似重复模板（可用工具移回）
+game_vision/templates/*/_dup/

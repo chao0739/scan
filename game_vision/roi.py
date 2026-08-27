@@ -57,16 +57,45 @@ class ROIProvider:
             # 光靠分数分不开 -> 只有「它出现在你上一帧的位置附近」这一条能分。mid_threshold=0 关闭。
             self.mid_win = pc.get("mid_window", [300, 120])
             self.mid_thr = pc.get("mid_threshold", 0.70)
+            # 边缘层：角色贴在屏幕最左/最右时名牌被画面切掉一半，整张模板永远匹配不上（真机曾因此 LOST 150 s 一动不动）。
+            # 全局搜索失败后，在左边缘窄条里用模板的右半、右边缘窄条里用左半再试一次。edge_threshold=0 关闭。
+            self.edge_thr = pc.get("edge_threshold", 0.72)
+            th, tw = self.tpl.shape
+            self._tpl_r, self._tpl_l = self.tpl[:, tw // 2:], self.tpl[:, :tw - tw // 2]
             self.adx, self.ady = pc.get("anchor_dx", 0), pc.get("anchor_dy", 0)
 
     def _match(self, gray, x1, y1, x2, y2):
         th, tw = self.tpl.shape
+        # 任何搜索窗都裁到 search_band 内：名牌只可能出现在游戏区，HUD（聊天栏/按钮文字）里的黑底白字能匹配到 0.7，
+        # 真机曾因此锁死在 y=646 的 HUD 文字上 35 s（run_20260827_130712）
+        bx1, by1, bx2, by2 = self.band
+        x1, y1, x2, y2 = max(x1, bx1), max(y1, by1), min(x2, bx2), min(y2, by2)
+        if x2 - x1 < tw or y2 - y1 < th:
+            return 0.0, None
         sub = gray[y1:y2, x1:x2]
         if sub.shape[0] < th or sub.shape[1] < tw:
             return 0.0, None
         res = cv2.matchTemplate(sub, self.tpl, cv2.TM_CCOEFF_NORMED)
         _, mx, _, loc = cv2.minMaxLoc(res)
         return float(mx), (x1 + loc[0], y1 + loc[1])
+
+    def _edge_search(self, gray):
+        """屏幕左右边缘窄条里匹配半张模板。返回等效的整张模板左上角（可能在画面外），找不到 None。"""
+        th, tw = self.tpl.shape
+        bx1, by1, bx2, by2 = self.band
+        best, best_xy = 0.0, None
+        for half, x1, x2, dx in ((self._tpl_r, 0, tw + 10, -(tw // 2)),          # 左边缘：只看得见名牌右半
+                                 (self._tpl_l, self.w - tw - 10, self.w, 0)):    # 右边缘：只看得见左半
+            sub = gray[by1:by2, max(0, x1):min(self.w, x2)]
+            if sub.shape[0] < th or sub.shape[1] < half.shape[1]:
+                continue
+            _, mx, _, loc = cv2.minMaxLoc(cv2.matchTemplate(sub, half, cv2.TM_CCOEFF_NORMED))
+            if mx > best:
+                best, best_xy = float(mx), (max(0, x1) + loc[0] + dx, by1 + loc[1])
+        if best >= self.edge_thr:
+            self.player_score = best
+            return best_xy
+        return None
 
     def locate_player(self, game_frame):
         """先在上一位置附近跟踪，连续丢失后再全局搜索；丢失期间沿用上一位置。"""
@@ -87,6 +116,8 @@ class ROIProvider:
                 if mx2 >= self.mid_thr:
                     self.player_score = mx2
                     found = loc2
+        if found is None and self.edge_thr and self._tpl_xy is not None and (self._tpl_xy[0] < tw or self._tpl_xy[0] > self.w - 2 * tw):
+            found = self._edge_search(gray)      # 上一位置本来就贴边：整张模板必然匹配不上，直接用半模板
         if found is None:
             self.lost_frames += 1
             if self._tpl_xy is None or self.lost_frames > self.lost_max:
@@ -95,6 +126,8 @@ class ROIProvider:
                 self.player_score = mx
                 if mx >= self.pthr:
                     found = loc
+                elif self.edge_thr:
+                    found = self._edge_search(gray)
         if found is not None:
             self.lost_frames = 0
             self._tpl_xy = found

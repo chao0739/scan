@@ -14,7 +14,9 @@
 import argparse
 import json
 import os
+import queue
 import sys
+import threading
 import time
 
 import cv2
@@ -108,6 +110,37 @@ def build_detector(monster, det_cfg):
                             det_cfg.get("flip", True), det_cfg.get("color_verify"))
 
 
+class AsyncWriter:
+    """VideoWriter 放到后台线程：主循环只把帧丢进队列（满了就丢帧），不被编码耗时拖慢。"""
+
+    def __init__(self, writer):
+        self.w = writer
+        self.q = queue.Queue(maxsize=60)
+        self.dropped = 0
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+
+    def _run(self):
+        while True:
+            f = self.q.get()
+            if f is None:
+                break
+            self.w.write(f)
+
+    def write(self, frame):
+        try:
+            self.q.put_nowait(frame)
+        except queue.Full:
+            self.dropped += 1
+
+    def release(self):
+        self.q.put(None)
+        self._t.join(timeout=10)
+        self.w.release()
+        if self.dropped:
+            print(f"[rec] 录像丢帧 {self.dropped}（编码跟不上）")
+
+
 def crop_template_ui(game_frame, monster):
     """暂停在当前矫正画面上拖框保存一张模板。返回是否保存了。"""
     win = f"crop template -> {monster}  (drag box, s save, esc cancel)"
@@ -160,9 +193,20 @@ def main(argv=None):
     ap.add_argument("--realtime", action="store_true", help="视频回放按原速播放")
     ap.add_argument("--control", default=None, choices=["off", "dry", "pico"], help="控制模式，覆盖 config.control.mode")
     ap.add_argument("--pico", default=None, help="Pico IP（覆盖 config.control.pico_host）")
+    ap.add_argument("--seconds", type=float, default=0, help="运行这么多秒后自动停止（0=不限；自动化真机测试用）")
+    ap.add_argument("--record", action="store_true", help="启动即录制摄像头原始画面到 recordings/（同窗口按 r）")
+    ap.add_argument("--set", action="append", default=[], metavar="a.b.c=value",
+                    help="临时覆盖任意配置项（不写入 settings），可多次。如 --set control.jump_on_stuck=true")
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
+    for kv in args.set:
+        k, _, v = kv.partition("=")
+        d = cfg
+        for part in k.split(".")[:-1]:
+            d = d.setdefault(part, {})
+        d[k.split(".")[-1]] = yaml.safe_load(v)   # 类型按 YAML 解析：true/3/0.5/字符串
+        print(f"[cfg] 覆盖 {k} = {d[k.split('.')[-1]]!r}")
     source = args.source if args.source is not None else cfg["camera"]["source"]
     if isinstance(source, str) and os.path.exists(source):
         source = os.path.abspath(source)  # 视频文件；摄像头编号/名称关键字原样交给 FrameSource
@@ -236,14 +280,24 @@ def main(argv=None):
         decision = Decision(ctl_cfg, actuator)
     print("[app] 按键: q 退出 | 空格 暂停 | m 切换怪物 | t 新增模板 | c 重新标定 | r 录制 | p 暂停/恢复控制")
     writer = None
+    if args.record:
+        os.makedirs("recordings", exist_ok=True)
+        writer, rec_path = open_writer(os.path.join("recordings", time.strftime("rec_%Y%m%d_%H%M%S")),
+                                       src.fps, (src.width, src.height))
+        writer = AsyncWriter(writer)
+        print(f"[rec] 开始录制 -> {rec_path}（与日志 {log_path} 同步：录像第 n 帧 = 日志 frame n）")
 
     show = not args.no_show
     last_state = None
     was_stuck = False
     frame_period = 1.0 / src.fps if args.realtime else 0
+    t_start = time.perf_counter()
     try:
         while True:
             t_loop = time.perf_counter()
+            if args.seconds and t_loop - t_start >= args.seconds:
+                print(f"[app] 到时 {args.seconds:.0f}s，停止")
+                break
             ok, frame = src.read()
             if not ok:
                 print("[app] 视频源结束")
@@ -288,8 +342,11 @@ def main(argv=None):
                    "held": decision.held if decision else None,
                    "patrol_target": decision.patrol_target if decision else None,
                    "bg_dx": round(bg_dx, 1), "stuck": decision.stuck if decision else None,
+                   "cmds": (decision.act.frame_cmds[:] or None) if decision else None,
                    "latency_ms": round(latency_ms, 2)}
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            if decision is not None:
+                decision.act.frame_cmds.clear()
             if detected != last_state or src.frame_index % every_n == 0:
                 print(json.dumps(rec, ensure_ascii=False))
                 last_state = detected
@@ -358,6 +415,7 @@ def main(argv=None):
                         h, w = frame.shape[:2]
                         writer, rec_path = open_writer(os.path.join("recordings", time.strftime("rec_%Y%m%d_%H%M%S")),
                                                        src.fps, (w, h))
+                        writer = AsyncWriter(writer)
                         print(f"[rec] 开始录制 -> {rec_path}")
                     else:
                         writer.release()

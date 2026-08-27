@@ -24,6 +24,7 @@ roi:
     lost_max: 5                # 连续丢失多少帧后全局重搜
     # 中间层：小窗跟丢后先在上一位置 ±mid_window 内找，>=mid_threshold 就接受（位置连续性）。
     # 屏幕边缘的真名牌只有 0.67~0.76，够不到全局阈值；假名牌分数与之重叠，只能靠位置区分。0 关闭。
+    edge_threshold: 0.72       # 屏幕最左/最右名牌被切掉一半时，用半张模板在边缘窄条里找（0 关闭）
     mid_window: [300, 120]
     mid_threshold: 0.72   # 录像回归扫出来的最低安全值：0.70/0.71 会锁到上一层平台上别人的名牌，0.72 起干净
     # 名牌匹配点（名牌左上角）到角色脚底中心的偏移
@@ -81,13 +82,22 @@ control:                 # P5/P6：检测结果 -> 按键（decision.py）
   # app.py 启动时按当前怪物取出来填到这里。两个都为 null 时退化成下面的「按时间掉头」。
   patrol_left_x: null
   patrol_right_x: null
-  patrol_tolerance: 30   # 玩家 x 进到端点这个范围内就算到端点，换朝另一端走
+  patrol_tolerance: 50   # 玩家 x 进到端点这个范围内就算到端点，换朝另一端走。含换向延迟造成的越过量：
+                         # 走速 ≈105 px/s × (KEY_UP+KEY_DOWN 两拍 120 ms + 游戏响应) ≈ 40 px，真机实测越过 ~55 px
   walk_max_ms: 3000      # 时间巡逻（未标端点时）单方向最多走多久后掉头
   turn_press_ms: 60      # 转身时方向键点按时长
   # P9 卡住检测（只报警不动作）：按着方向键 stuck_ms 内 玩家 x 位移 <= stuck_move_px 且 背景滚动 <= stuck_scroll_px/帧
   stuck_ms: 1500
   stuck_move_px: 3
   stuck_scroll_px: 1.5
+  # P10 跳跃恢复：卡住 -> 按着方向键点一下跳跃键；jump_recover_ms 内观察；连续 jump_max_retry 次无效 -> 掉头
+  jump_on_stuck: false
+  jump_key: alt
+  jump_press_ms: 80
+  jump_recover_ms: 900
+  jump_max_retry: 3
+  jump_clear_px: 40      # 跳后离开卡住点这么远（位移+镜头滚动）才算脱困；顶墙弹回只有十几像素不算
+  giveup_walk_ms: 4000   # 放弃掉头后，这段时间内端点逻辑不翻转（卡在端点外侧时否则会立刻翻回来）
   lost_release_frames: 10  # 玩家定位连续丢失多少帧后松开全部按键
   sync_interval_ms: 1000 # 定期重发期望按键状态（抗 UDP 丢包）
   start_dir: right

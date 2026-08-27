@@ -11,6 +11,8 @@
         时间巡逻——没设端点时退化为原来的「走 walk_max_ms 后掉头」
 P9 卡住检测（只报警，不动作）：按着方向键 stuck_ms 内玩家屏幕 x 没动(<=stuck_move_px) 且背景没滚(<=stuck_scroll_px)
   -> self.stuck=True（日志 stuck 字段 / 画面 STUCK）。镜头跟随时人不动但背景在滚，不算卡住；没按方向键不算卡住。
+P10 跳跃恢复（jump_on_stuck=true 时）：巡逻中卡住 -> 方向键继续按着 + 点一下 jump_key -> jump_recover_ms 内不再判定；
+  仍卡住则重试，连续 jump_max_retry 次无效 -> 放弃：掉头朝另一端走（重试计数在人动起来后清零）。
 安全：
   暂停(p) / 玩家丢失 lost_release_frames 帧 -> 松开全部按键
   每 sync_interval_ms 重发一次期望的按键状态（UDP 丢包导致的卡键最多持续这么久）
@@ -26,9 +28,11 @@ class DryRunActuator:
     def __init__(self, log=print):
         self.log = log
         self.sent = []
+        self.frame_cmds = []          # 本帧发出的命令（app.py 写进日志后清空）
 
     def _emit(self, cmd):
         self.sent.append(cmd)
+        self.frame_cmds.append(cmd)
         self.log(f"[dry] {cmd}")
 
     def key_down(self, key):
@@ -48,25 +52,28 @@ class DryRunActuator:
 
 
 class PicoActuator:
-    """把动作转成 Pico UDP 命令。控制命令不等回复（避免阻塞视觉循环）；KEY_UP/RELEASE_ALL 发两遍抗丢包。"""
+    """把动作转成 Pico UDP 命令。控制命令不等回复、走 PicoClient 的节拍队列（Pico 收不了连发包，见 pico_client.py）。"""
 
     def __init__(self, client):
         self.pc = client
         self.pc.start_heartbeat()
+        self.frame_cmds = []          # 本帧发出的命令（app.py 写进日志后清空）
+
+    def _send(self, cmd):
+        self.frame_cmds.append(cmd)
+        self.pc.send(cmd, wait_reply=False)
 
     def key_down(self, key):
-        self.pc.send(f"KEY_DOWN {key}", wait_reply=False)
+        self._send(f"KEY_DOWN {key}")
 
     def key_up(self, key):
-        for _ in range(2):
-            self.pc.send(f"KEY_UP {key}", wait_reply=False)
+        self._send(f"KEY_UP {key}")
 
     def key_press(self, key, ms):
-        self.pc.send(f"KEY_PRESS {key} {ms}", wait_reply=False)
+        self._send(f"KEY_PRESS {key} {ms}")
 
     def release_all(self):
-        for _ in range(2):
-            self.pc.send("RELEASE_ALL", wait_reply=False)
+        self._send("RELEASE_ALL")
 
     def close(self):
         self.pc.close()
@@ -78,6 +85,8 @@ DEFAULTS = dict(attack_key="ctrl", attack_press_ms=60, attack_interval_ms=700, a
                 approach=True, patrol=True, walk_max_ms=3000, turn_press_ms=60,
                 patrol_left_x=None, patrol_right_x=None, patrol_tolerance=30,
                 stuck_ms=1500, stuck_move_px=3, stuck_scroll_px=1.5,
+                jump_on_stuck=False, jump_key="alt", jump_press_ms=80, jump_recover_ms=900, jump_max_retry=3,
+                jump_clear_px=40, giveup_walk_ms=4000,
                 lost_release_frames=10, sync_interval_ms=1000, start_dir="right")
 
 
@@ -98,6 +107,13 @@ class Decision:
         self.stuck_count = 0              # 进入卡住状态的次数（日志/验收用）
         self._still_since = None          # 上次「有位移」的时间
         self._still_x = None
+        self.jump_count = 0               # P10：跳跃恢复次数
+        self.giveup_count = 0             # P10：重试用尽掉头次数
+        self._retry = 0                   # 当前这次卡住已连续跳了几次
+        self._recover_until = 0.0         # 跳完等待观察的截止时间
+        self._stuck_x = None              # 这一串卡住开始时的 x；离开它 jump_clear_px 以上才算脱困
+        self._stuck_scroll = 0.0          # 卡住以来累计的背景滚动（镜头跟随时人不动但在走）
+        self._no_flip_until = 0.0         # 放弃掉头后这段时间内端点逻辑不许再翻转（否则卡在端点外侧时会 0 秒来回翻）
         self.last_attack = 0.0
         self.last_seen = None            # (time, side) 最近一次看到怪
         self.lost_frames = 0
@@ -157,7 +173,9 @@ class Decision:
         if self.patrol_target is None:                      # 第一帧：朝更远的那一端走
             self.patrol_target = "left" if abs(player_x - l) > abs(player_x - r) else "right"
         # 只在「到达目标端」时翻转，所以坐标抖动不会来回换向（另一端还远着）
-        if self.patrol_target == "right" and player_x >= r - tol:
+        if now < self._no_flip_until:
+            pass                                             # 刚放弃掉头：先走开一段再让端点逻辑说话
+        elif self.patrol_target == "right" and player_x >= r - tol:
             self.patrol_target = "left"
         elif self.patrol_target == "left" and player_x <= l + tol:
             self.patrol_target = "right"
@@ -172,6 +190,13 @@ class Decision:
         if (self._still_x is None or abs(player_x - self._still_x) > c["stuck_move_px"]
                 or abs(bg_dx) > c["stuck_scroll_px"]):
             self._still_since, self._still_x = now, player_x   # 人动了 或 镜头在滚 -> 重新计时
+        if self._retry:
+            # 跳过一次之后：只有真正离开卡住点（位移+镜头滚动 > jump_clear_px）才算脱困、清零重试；
+            # 顶着墙跳会弹回原地、位移只有十几像素，不能算脱困，否则会在墙前无限跳
+            if abs(bg_dx) > c["stuck_scroll_px"]:          # 只累计真实滚动，不累计每帧 0.1~0.3 的噪声
+                self._stuck_scroll += abs(bg_dx)
+            if abs(player_x - self._stuck_x) + self._stuck_scroll > c["jump_clear_px"]:
+                self._retry = 0
         was = self.stuck
         self.stuck = (now - self._still_since) * 1000 >= c["stuck_ms"]
         if self.stuck and not was:
@@ -233,6 +258,29 @@ class Decision:
                 self.state = "IDLE"
 
         self._update_stuck(now, player_x, bg_dx)
+        if self.stuck and self.state == "PATROL" and c["jump_on_stuck"] and now >= self._recover_until:
+            if self._retry < c["jump_max_retry"]:
+                if self._retry == 0:
+                    self._stuck_x, self._stuck_scroll = player_x, 0.0
+                # 方向键保持按着，点一下跳跃键 = 向前跳；之后给它 jump_recover_ms 观察有没有脱困
+                self.act.key_press(c["jump_key"], c["jump_press_ms"])
+                self._retry += 1
+                self.jump_count += 1
+                self._recover_until = now + c["jump_recover_ms"] / 1000
+                self._still_since = now          # 重新计时：跳跃本身不算位移，落地后 stuck_ms 内没动才算仍卡住
+                self.state = "RECOVER"
+            else:
+                # 跳了 N 次还卡着：放弃，掉头走。位置巡逻改目标端；时间巡逻直接换方向
+                self.giveup_count += 1
+                self._retry = 0
+                self._no_flip_until = now + c["giveup_walk_ms"] / 1000
+                if self.patrol_target:
+                    self.patrol_target = "left" if self.patrol_target == "right" else "right"
+                    self._hold(self.patrol_target, now)
+                else:
+                    self._hold("left" if self.held == "right" else "right", now)
+                self._still_since = now
+                self.state = "GIVEUP"
 
         # 定期同步按键状态：防止 UDP 丢包造成的卡键/漏按
         if (now - self.last_sync) * 1000 >= c["sync_interval_ms"]:
