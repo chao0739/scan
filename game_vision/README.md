@@ -34,7 +34,8 @@ python menu.py
    端点按怪物名存在 `settings.yaml` 的 `patrol` 段；没标端点时巡逻退化为「走 walk_max_ms 后掉头」。
    保存后若两端都抠到了地标，会问用哪种坐标：**屏幕坐标**（简单可靠，要求端点在镜头被顶住处）或
    **地图坐标**（`worldpos.py` 靠地标校准，端点可在任意位置，包括镜头跟随区）。可在「巡逻端点→切换坐标模式」改。
-6. **开始检测**
+6. **开始检测**。掉帧/省 CPU：「设置 → 运行方式」选「不开窗口」（可顺便设自动停止秒数），之后「开始检测」不弹画面、Ctrl+C 停止；
+   命令行等价 `python app.py --no-show [--seconds 600]`。
 
 以后日常只需 `python menu.py` → `1`。换地图：怪物模板 → 新建/选择怪物 → 采模板。换号：玩家设置 → 新增/切换。
 摄像头挪动后重新标定。所有选择都记在 `settings.yaml`，下次自动沿用。
@@ -73,12 +74,13 @@ python menu.py
 |---|---|---|
 | camera | source / width / height / ndi_transport | `ndi:<源名关键字>` / 摄像头编号 / 名称关键字（如 `Insta360`）/ 视频路径。`ndi_transport: tcp`（默认；libndi 默认的 RUDP/UDP 在本网上连得上但收不到帧） |
 | screen | output_width/height | 矫正后虚拟游戏画面尺寸（**模板尺寸与其绑定**，改了要重抠模板） |
-| roi.player | template / match_threshold / local_threshold / track_window / mid_window / mid_threshold | 用玩家名牌定位玩家：小窗跟踪(±120) → 丢了先在上一位置 ±mid_window 内找(≥mid_threshold，靠位置连续性认边缘处的低分真名牌) → 再全局搜(≥match_threshold)。摄像头拍屏用 0.82/0.72/0.65；**NDI 清晰画面名牌半透明、暗背景真值只 0.76–0.8，模板只抠名字一圈以内（32×12），阈值 0.70/0.62/0.55**（假峰 ≤0.46） |
+| app | show / run_seconds / cv_threads | 菜单「开始检测」的运行方式：不开窗口、到时自动停；`cv_threads: 2`——ROI 只有 300×90，OpenCV 8 线程切不开只是空转（帧率相同、CPU 241% → 148%） |
+| roi.player | template / match_threshold / local_threshold / track_window / mid_window / mid_threshold | 用玩家名牌定位玩家：小窗跟踪(±120) → 丢了先在上一位置 ±mid_window 内找(≥mid_threshold，靠位置连续性认边缘处的低分真名牌) → 再全局搜(≥match_threshold)。摄像头拍屏用 0.82/0.72/0.65；**NDI 清晰画面名牌半透明、暗背景真值只 0.76–0.8，模板只抠名字一圈以内（32×12），阈值 0.70/0.62/0.55**（假峰 ≤0.46）。全局搜索是「粗到精」（`global_coarse_scale: 0.5` / `topk: 20`：缩小找 20 个峰再全分辨率精修，11 ms → 3.7 ms，620 帧只漏 1 帧且下一帧即补）；`global_coarse_scale: 0` 回到整幅全分辨率搜 |
 | minimap | enabled / region / px_scale / yellow_lo,hi / min_area,max_area | 小地图黄点定位（`minimap.py`）；`patrol.<怪物>.mode: minimap` 时巡逻用它。region 要把整个小地图窗口（含右/下边框）框进来 |
 | roi.world | enabled / deadband / lock_frames / landmark_thr / fix_every / landmark_box | 地图 x 估计（`worldpos.py`）：屏幕 x + 累加镜头位移(bg_dx)，靠地图边界归零或地标匹配防漂移。端点标定时会自动抠地标 |
-| roi | facing / near_offset / far_offset / up / down / scroll_band | 玩家前方 ROI（up/down 只覆盖同一层，默认 70/20）。`facing`: **`key`**(用决策按住的方向键定朝向，只检测前进方向，推荐) / `auto`(按位移估计) / `right` / `left` / `both`。far_offset 现为 140（攻击区，不追怪）。scroll_band 是估计背景滚动量的画面带 |
+| roi | facing / near_offset / far_offset / up / down / scroll_band | 玩家前方 ROI（up/down 只覆盖同一层，默认 70/20——上 135 会把上层平台的怪框进来、站在下面对着够不着的怪挥刀）。near_offset<0 时两侧矩形重叠会自动合并成一个（不重复匹配，怪在哪侧按位置判断）。**菜单「设置 → 检测范围」可在画面上拖框设置**：定格后在角色面朝一侧拖框，自动换算成相对脚底的前/后/上/下距离（左侧拖也行，运行时左右镜像；near 为负 = 从身后开始）。`facing`: **`key`**(用决策按住的方向键定朝向，只检测前进方向，推荐) / `auto`(按位移估计) / `right` / `left` / `both`。far_offset 现为 140（攻击区，不追怪）。scroll_band 是估计背景滚动量的画面带 |
 | roi.facing_auto | window / min_move | 前进方向判定：累计最近 N 帧的“角色屏幕位移 − 背景滚动位移”，超过 min_move 像素才切换方向 |
-| detection | threshold / color_verify.max_dist / edge_min / topk / flip | 模板分阈值（开校验后 0.55）；候选框颜色直方图距离上限 0.48；边缘图匹配下限 0.4；每模板检查的峰数；flip 自动加水平翻转模板 |
+| detection | threshold / sure_score / motion_min / color_verify.max_dist / edge_min / topk / flip | `threshold` 是候选下限（0.5）；`sure_score`(0.65) 以上直接接受，之间的候选还要求**框里在动**（与上一帧按背景滚动对齐后的平均灰度差 ≥ `motion_min`=5）——棕色岩壁纹理能拿 0.5~0.63 并骗过颜色/边缘校验但它不动，走动/被打的怪 15~60；发呆的中分怪会漏（与只用 0.65 时相同）。2026-08-28 录像回归：命中帧 319→576，人工核对新增的全是真怪。候选框颜色直方图距离上限 0.48；边缘图匹配下限 0.4；每模板检查的峰数；flip 自动加水平翻转模板；`idle_skip: 2` 空闲跳帧——去抖窗口内一次都没命中时每 2 帧才跑一次模板匹配（占单帧 70% 的开销减半），一有命中立刻逐帧，首次发现最多晚 1 帧（33 ms）；日志里该帧带 `det_skipped: true` |
 | debounce | window_size / enter_min_hits / exit_min_misses | 滞回去抖：5 帧中 ≥3 命中进入，≥4 未命中退出 |
 | control | mode / attack_key / attack_interval_ms / approach / patrol_tolerance / walk_max_ms … | 决策：off 只检测 / dry 只打日志 / pico 真发按键。有怪（在攻击区内）：站着打（approach=false 不追）；没怪：在两个端点间巡逻（端点存 settings `patrol.<怪物名>`）。`p` 暂停 |
 | control | stuck_ms / stuck_move_px / stuck_scroll_px | P9 卡住检测：按着方向键 1.5 s 内玩家 x 没动且背景没滚 → `stuck`（只报警） |
@@ -103,8 +105,11 @@ python menu.py
 - 任何要读实时画面的工具都必须走 `camera.FrameSource`（菜单的采集/标定/抠模板、`tools/harvest_templates.py` 都已是）；
   直接 `cv2.VideoCapture("ndi:...")` 会得到 0 帧（半自动采集曾因此"没有找到任何候选"）。
 - Wi-Fi 上一路 1080p 约 110 Mbit/s；本机 OBS 同时也在收就是两路，尽量别再开第三个接收端。
+- **内存泄漏已修（2026-08-28）**：cyndilib frame-sync 每次 `capture_video()` 都要配对释放，等新帧的轮询里没取数据就不会释放，
+  每帧漏 8 MB → 一分多钟吃光内存、进程假死、被 OOM 杀（`journalctl -k | grep "Out of memory"` 可查）。`camera.py` 轮询到同一帧时现在会 `memoryview(vf).release()`。
 - **不要把 B 机改成 720p 输出**：模拟实测名牌假峰从 0.48 涨到 0.68（阈值 0.70），会跟错；处理耗时也不会少（矫正后都是 1280×720）。
   掉帧先查本机 CPU：跑图时别同时跑采集/去重/离线分析，A 机 OBS 不看画面时可以把它的 NDI 源停掉。
+  单帧开销见下面「当前指标」：模板匹配占 70%，`detection.idle_skip` / `app.cv_threads` / 名牌粗到精搜索三项默认已开，30 fps 不掉帧、CPU 134%。
 - **Pico 的按键是发到 B 机当前焦点窗口的**：B 机开着 OBS 时要把游戏窗口点回前台，否则脚本"OK"了但角色不动。
 
 ## Ubuntu / Linux 注意
@@ -147,6 +152,12 @@ python tools/harvest_templates.py pick --name stump_map01 --ids 0,3,5-9,12 --out
 - 10 min 稳定性（`run_20260827_133139`）：**57 个来回**，单趟中位 4.8 s，LOST 0%，STUCK 5 次（均自行恢复），无卡键/断连/崩溃，29.8 fps。
 - 同一段代码在发送节拍修复前（`run_20260827_130712`）：150 s 仅 5 个来回、STUCK 33 次、单趟 14–120 s —— 差别全在 Pico 丢包。
 - 模板注意：被打击时闪白/半透明的帧**不要**做模板（曾有一张这样的模板在空白天空上误报 0.8）。
+- **单帧开销（2026-08-28，yezhu 21 张模板 ×翻转，1 个 ROI，`harvest_yezhu.mp4` 1152 帧）**：模板匹配 21.4 ms（70%，42 次 matchTemplate）、
+  名牌定位 4.5 ms（局部 1.5 + 丢失后全局重搜 11–16 ms/次）、读帧 2.1、矫正 0.9–3、背景滚动 1、小地图 0.3，其余可忽略；合计 ~30 ms ≈ 帧周期，
+  真机（`run_20260828_141513`）只有 25.4 fps、p90 54 ms。三项优化后（`cv_threads: 2` + 名牌粗到精 + `idle_skip: 2`）录像回归 raw/detected/player 逐帧一致
+  （检测事件数相同、个别事件晚 1 帧），真机 60 s **30.0 fps 零掉帧、进程 CPU 134%**（原 ~240%），空闲帧 ~9 ms、检测帧 ~25 ms。
+  试过不值得做的：iGPU/MX150 OpenCL（30 ms 比 CPU 20 ms 还慢，小 kernel 启动开销）；再删模板（两两相似度都 <0.75，已无冗余）。
+  还能做的：匹配降到 0.5 倍尺度「粗到精」（模板匹配 21.9 → 5.2 ms/ROI，但要用标注帧重标 threshold/max_dist/edge_min）。
 
 ## 已知限制 / 下一步
 - **Pico v1 固件收不了连发包**（见 `pico/README.md` P1 v2）：A 端已用 ≥60 ms 节拍队列规避；攻击/拾取按键积压 ≥3 时丢弃。

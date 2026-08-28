@@ -24,10 +24,14 @@ def hs_hist(bgr, h_bins=18, s_bins=8):
 
 
 class TemplateDetector:
-    def __init__(self, template_dir, threshold=0.7, scales=(1.0,), grayscale=True, flip=True, color_verify=None):
+    def __init__(self, template_dir, threshold=0.7, scales=(1.0,), grayscale=True, flip=True, color_verify=None,
+                 sure_score=0.0, motion_min=5.0):
         """color_verify: None/False 关闭；或 dict(max_dist=0.48, edge_min=0.4, topk=3, h_bins=18, s_bins=8)。
-        edge_min: 候选框与模板在 Sobel 边缘图上的匹配分下限（0 关闭）。"""
+        edge_min: 候选框与模板在 Sobel 边缘图上的匹配分下限（0 关闭）。
+        sure_score/motion_min: 运动门槛（只在开了 color_verify 且 detect() 传了 diff 时生效）：模板分 ≥ sure_score 直接接受；
+        threshold~sure_score 之间的候选还要求候选框内与上一帧的平均灰度差 ≥ motion_min（岩壁纹理不动，怪会动）。sure_score=0 关闭。"""
         self.threshold = threshold
+        self.sure_score, self.motion_min = float(sure_score or 0), float(motion_min)
         self.scales = list(scales)
         self.grayscale = grayscale
         cv = color_verify if isinstance(color_verify, dict) else {}
@@ -55,12 +59,13 @@ class TemplateDetector:
                     em = edge_map(cimg) if (self.color_verify and self.edge_min > 0) else None
                     self.templates.append((name, m, hist, em))
 
-    def detect(self, roi):
-        """返回 dict(score, loc=(x,y,w,h) 相对 ROI, template, raw, color_dist, edge_score, verified)。
-        score = 最佳（通过颜色校验的）候选的模板分；未开颜色校验时 verified 恒为 True。"""
+    def detect(self, roi, diff=None):
+        """返回 dict(score, loc=(x,y,w,h) 相对 ROI, template, raw, color_dist, edge_score, motion, verified)。
+        score = 最佳（通过校验的）候选的模板分；未开颜色校验时 verified 恒为 True。
+        diff: 与 ROI 同尺寸的「本帧-上一帧」灰度差图（roi.ROIProvider.motion_diff 切出来的），None = 不做运动门槛。"""
         roi_bgr = roi
         roi_m = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if (self.grayscale and roi.ndim == 3) else roi
-        best = {"score": -1.0, "loc": None, "template": None, "color_dist": None, "edge_score": None, "verified": False}
+        best = {"score": -1.0, "loc": None, "template": None, "color_dist": None, "edge_score": None, "motion": None, "verified": False}
         roi_edge = edge_map(roi_bgr) if (self.color_verify and self.edge_min > 0) else None
         fallback = dict(best)  # 没有任何候选通过校验时，记录分数最高的未通过候选（便于日志/调参）
         for name, t, hist, tedge in self.templates:
@@ -72,7 +77,7 @@ class TemplateDetector:
                 _, mx, _, (x, y) = cv2.minMaxLoc(res)
                 if mx > best["score"]:
                     best = {"score": float(mx), "loc": (x, y, tw, th), "template": name, "color_dist": None,
-                            "edge_score": None, "verified": True}
+                            "edge_score": None, "motion": None, "verified": True}
                 continue
             for _ in range(self.topk):
                 _, mx, _, (x, y) = cv2.minMaxLoc(res)
@@ -83,9 +88,12 @@ class TemplateDetector:
                 es = None
                 if tedge is not None:
                     es = float(cv2.matchTemplate(roi_edge[y:y + th, x:x + tw], tedge, cv2.TM_CCOEFF_NORMED)[0, 0])
+                mv = None
+                if diff is not None and self.sure_score and mx < self.sure_score:
+                    mv = float(diff[y:y + th, x:x + tw].mean())   # 中分候选：框里必须在动
                 cand = {"score": float(mx), "loc": (x, y, tw, th), "template": name, "color_dist": round(d, 3),
-                        "edge_score": None if es is None else round(es, 3)}
-                if d <= self.max_dist and (es is None or es >= self.edge_min):
+                        "edge_score": None if es is None else round(es, 3), "motion": None if mv is None else round(mv, 1)}
+                if d <= self.max_dist and (es is None or es >= self.edge_min) and (mv is None or mv >= self.motion_min):
                     best = dict(cand, verified=True)
                     break
                 if mx > fallback["score"]:

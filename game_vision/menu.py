@@ -107,8 +107,9 @@ def rectifier():
     return Rectifier(corners, sc["output_width"], sc["output_height"])
 
 
-def live_freeze_and_drag(title, hint, rect=None):
-    """打开摄像头实时画面（矫正后），空格定格 → 拖框 → s 保存。返回 (frame, (x0,y0,x1,y1)) 或 None。"""
+def live_freeze_and_drag(title, hint, rect=None, overlay=None):
+    """打开摄像头实时画面（矫正后），空格定格 → 拖框 → s 保存。返回 (frame, (x0,y0,x1,y1)) 或 None。
+    overlay(frame, vis)：可选，每次刷新时在 vis 上叠加额外标记（如玩家位置、当前范围）。"""
     try:
         src = open_source()
     except Exception as e:
@@ -154,6 +155,8 @@ def live_freeze_and_drag(title, hint, rect=None):
             state["frame"] = rect(f)
         frame = state["frozen"] if state["frozen"] is not None else state["frame"]
         vis = frame.copy()
+        if overlay is not None:
+            overlay(frame, vis)
         r = box_rect()
         if box["p0"] and box["p1"]:
             cv2.rectangle(vis, box["p0"], box["p1"], (0, 255, 0) if r else (0, 0, 255), 1)
@@ -468,19 +471,77 @@ def menu_monster():
         act()
 
 
+def roi_box_to_offsets(box, player):
+    """拖出的框 (x0,y0,x1,y1) + 玩家脚底 (px,py) -> (near, far, up, down)。框中心在玩家左边就按左侧镜像换算（运行时左右对称）。"""
+    x0, y0, x1, y1 = box
+    px, py = player
+    if (x0 + x1) / 2 >= px:
+        near, far = x0 - px, x1 - px
+    else:
+        near, far = px - x1, px - x0
+    return int(round(near)), int(round(far)), int(round(py - y0)), int(round(y1 - py))
+
+
+def do_roi_drag():
+    """在画面上拖框设置检测范围（怪物搜索 ROI）：框按玩家脚底换算成 near/far/up/down 存进 settings。"""
+    c = cfg()
+    try:
+        rp = ROIProvider(c["roi"], c["screen"]["output_width"], c["screen"]["output_height"])
+    except Exception as e:
+        print("玩家名牌模板不可用（先到「玩家设置」新增玩家）:", e)
+        return
+    r = c["roi"]
+
+    def overlay(frame, vis):
+        p = rp.locate_player(frame)
+        if p is None or rp.lost_frames:
+            cv2.putText(vis, "player nameplate NOT found in this frame", (6, 46), 0, 0.6, (0, 0, 255), 2)
+            return
+        px, py = map(int, p)
+        cv2.drawMarker(vis, (px, py), (255, 0, 255), cv2.MARKER_CROSS, 24, 2)          # 紫色十字 = 玩家脚底（换算基准）
+        for sgn in (1, -1):                                                              # 青色 = 当前范围（右侧 + 左侧镜像）
+            xa, xb = sorted((px + sgn * r["near_offset"], px + sgn * r["far_offset"]))
+            cv2.rectangle(vis, (xa, py - r["up"]), (xb, py + r["down"]), (255, 255, 0), 1)
+
+    print("在画面里：等角色和名牌清晰可见时按 空格 定格 → 在角色【面朝的一侧】拖出检测框 → 按 s 保存。")
+    print("紫色十字 = 玩家脚底（框会换算成相对它的 前/后/上/下 距离，运行时左右自动镜像）；青色框 = 当前范围。")
+    print(f"当前: 前方 {r['near_offset']}~{r['far_offset']} px，上 {r['up']} / 下 {r['down']} px。框越大越费时（模板匹配耗时 ∝ 面积，300x90 ≈ 20 ms/帧）")
+    res = live_freeze_and_drag("set detection range", "drag the DETECTION BOX on the side the player faces (magenta=feet, cyan=current)", overlay=overlay)
+    if res is None:
+        print("已取消")
+        return
+    frame, box = res
+    p = rp.locate_player(frame)
+    if p is None or rp.lost_frames:
+        print("定格画面上没定位到玩家名牌，无法换算；请在名牌清晰可见时重新定格")
+        return
+    near, far, up, down = roi_box_to_offsets(box, p)
+    if far - near < 20 or up + down < 10:
+        print(f"框太小（宽 {far - near}、高 {up + down}），没有保存")
+        return
+    for k, v in (("near_offset", near), ("far_offset", far), ("up", up), ("down", down)):
+        set_setting(f"roi.{k}", v)
+    side = "右" if (box[0] + box[2]) / 2 >= p[0] else "左"
+    print(f"已保存检测范围（按{side}侧的框换算）：前方 {near}~{far} px，上 {up} / 下 {down} px，ROI {far - near}x{up + down}"
+          f"（原 300x90 ≈ 20 ms/帧，估计 {(far - near) * (up + down) / 27000 * 20:.0f} ms/帧）"
+          + ("；near 为负 = 从角色身后开始" if near < 0 else ""))
+
+
 def menu_settings():
     while True:
         c = cfg()
         act = choose("设置", [
             (f"摄像头      当前: {c['camera']['source']}", "cam"),
             (f"朝向模式    当前: {c['roi']['facing']}  (key=按方向键,推荐 / auto / left / right / both)", "facing"),
-            (f"匹配阈值    当前: {c['detection']['threshold']}", "thr"),
-            (f"ROI 前方距离 当前: {c['roi']['near_offset']}~{c['roi']['far_offset']} px", "roi"),
+            (f"匹配阈值    当前: 候选下限 {c['detection']['threshold']}，直接接受 {c['detection'].get('sure_score', 0)}（之间的要求框里在动）", "thr"),
+            (f"检测范围(ROI) 当前: 前方 {c['roi']['near_offset']}~{c['roi']['far_offset']} px, 上 {c['roi']['up']} / 下 {c['roi']['down']} px  (画面上拖框 / 输入数字)", "roi"),
             (f"控制模式    当前: {c.get('control', {}).get('mode', 'off')}  (off=只检测 / dry=只打日志 / pico=真按键)", "ctl"),
             (f"攻击键/拾取键/间隔 当前: {c.get('control', {}).get('attack_key')} / {c.get('control', {}).get('pickup_key')} / {c.get('control', {}).get('attack_interval_ms')} ms", "atk"),
             (f"卡住后跳跃恢复 当前: {'开' if c.get('control', {}).get('jump_on_stuck') else '关'}  (卡住 1.5s -> 按着方向键跳; 连跳 3 次无效 -> 掉头)", "jump"),
             (f"拟人随机动作 当前: 随机跳 {c.get('control', {}).get('human_jump_per_min')}/min, 端点偏移 ±{c.get('control', {}).get('human_endpoint_px')}px, "
              f"端点停顿 0~{c.get('control', {}).get('human_pause_ms')}ms  (0=关)", "human"),
+            (f"运行方式    当前: {'开窗口' if (c.get('app') or {}).get('show', True) else '不开窗口(省 CPU, Ctrl+C 停)'}，"
+             f"时长 {(c.get('app') or {}).get('run_seconds') or 0} s (0=不限)", "runmode"),
         ])
         if act is None:
             return
@@ -502,8 +563,10 @@ def menu_settings():
             if v:
                 set_setting("roi.facing", v)
         elif act == "thr":
-            v = ask("阈值 0~1，越高越严格", c["detection"]["threshold"])
+            v = ask("候选下限 threshold（0~1；开着颜色校验+运动门槛时 0.5 合适）", c["detection"]["threshold"])
             set_setting("detection.threshold", float(v))
+            v2 = ask("直接接受分 sure_score（≥此分不看运动；threshold~此分之间要求候选框里在动；0=关运动门槛）", c["detection"].get("sure_score", 0.65))
+            set_setting("detection.sure_score", float(v2))
         elif act == "ctl":
             v = choose("控制模式", [("off（只检测）", "off"), ("dry（只打日志，不发按键）", "dry"), ("pico（真发按键给 Pico）", "pico")])
             if v:
@@ -521,6 +584,12 @@ def menu_settings():
                 set_setting("control.jump_on_stuck", v)
                 k = ask("跳跃键（Pico 键名）", c.get("control", {}).get("jump_key", "alt"))
                 set_setting("control.jump_key", str(k))
+        elif act == "runmode":
+            v = choose("运行时显示画面窗口？", [("不开窗口（省 CPU，掉帧时用；Ctrl+C 或到时自动停）", False), ("开窗口（能看 ROI/分数，q 退出）", True)])
+            if v is not None:
+                set_setting("app.show", v)
+            secs = ask("运行多少秒后自动停止（0=不限）", (c.get("app") or {}).get("run_seconds") or 0)
+            set_setting("app.run_seconds", float(secs))
         elif act == "human":
             cc = c.get("control", {})
             v = ask("巡逻中平均每分钟随机跳几次（0=不跳）", cc.get("human_jump_per_min", 4))
@@ -530,10 +599,20 @@ def menu_settings():
             v = ask("到端点后随机停顿的最长毫秒（0=关）", cc.get("human_pause_ms", 800))
             set_setting("control.human_pause_ms", float(v))
         elif act == "roi":
-            a = ask("近端(px)", c["roi"]["near_offset"])
+            how = choose("怎么设检测范围", [("在画面上拖框（推荐：定格 → 在角色面朝一侧拖框 → s）", "drag"), ("输入数字（相对角色脚底的 前/后/上/下 距离）", "num")])
+            if how == "drag":
+                do_roi_drag()
+                continue
+            if how != "num":
+                continue
+            a = ask("近端(px)，负数=从角色身后开始", c["roi"]["near_offset"])
             b = ask("远端(px)", c["roi"]["far_offset"])
+            u = ask("向上(px)，只盖同一层即可（怪高约 40~60）", c["roi"]["up"])
+            d = ask("向下(px)", c["roi"]["down"])
             set_setting("roi.near_offset", int(a))
             set_setting("roi.far_offset", int(b))
+            set_setting("roi.up", int(u))
+            set_setting("roi.down", int(d))
         print("已保存")
 
 
@@ -778,8 +857,19 @@ def do_run():
         print("玩家名牌模板不存在，请先到「玩家设置」新增玩家")
         return
     mode = c.get("control", {}).get("mode", "off")
-    print(f"控制模式: {mode}（在「设置」里改）。窗口按键: q 退出 | 空格 暂停 | p 暂停/恢复控制 | t 抠模板 | r 录制 | c 重新标定")
-    app.main(["--source", str(c["camera"]["source"]), "--monster", m])
+    ac = c.get("app") or {}
+    show, secs = bool(ac.get("show", True)), float(ac.get("run_seconds") or 0)
+    argv = ["--source", str(c["camera"]["source"]), "--monster", m]
+    if not show:
+        argv.append("--no-show")
+    if secs > 0:
+        argv += ["--seconds", str(secs)]
+    if show:
+        print(f"控制模式: {mode}（在「设置」里改）。窗口按键: q 退出 | 空格 暂停 | p 暂停/恢复控制 | t 抠模板 | r 录制 | c 重新标定")
+    else:
+        print(f"控制模式: {mode}。无窗口运行（省 CPU）：{'到 %.0f 秒自动停' % secs if secs > 0 else '不限时'}，"
+              "随时按 Ctrl+C 停止（退出时自动松开全部按键）。要开窗口在「设置 → 运行方式」里改")
+    app.main(argv)
 
 
 def do_review():

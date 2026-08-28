@@ -180,6 +180,10 @@ class _NDIReceiver:
                     self._last_ts = ts
                     a = np.asarray(self.vf.get_array(), dtype=np.uint8).reshape(self.vf.yres, self.vf.xres, 4)
                     return True, cv2.cvtColor(a, cv2.COLOR_BGRA2BGR)   # BGRX -> BGR（cvtColor 比 numpy 切片拷贝快 3 倍；同时脱离 NDI 内部缓冲）
+                # 还是同一帧：这次 capture_video 也向 SDK 拿了一个帧引用（NDIlib_framesync_capture_video 必须配对 free_video），
+                # 而 cyndilib 只在缓冲区视图释放时才 free（get_array 内部会做，这里没取数据就不会）。不释放 = 每帧漏 8 MB，
+                # 30 fps 一分多钟吃光 16 GB + 4 GB swap，进程假死后被 OOM 杀掉（2026-08-28 三次）。memoryview 进出一次即触发释放。
+                memoryview(self.vf).release()
             if time.perf_counter() >= t_end:
                 return False, None
             time.sleep(0.002)

@@ -109,7 +109,8 @@ def choose_monster(default):
 def build_detector(monster, det_cfg):
     return TemplateDetector(os.path.join(TEMPLATE_ROOT, monster), det_cfg["threshold"],
                             det_cfg.get("scales", [1.0]), det_cfg.get("grayscale", True),
-                            det_cfg.get("flip", True), det_cfg.get("color_verify"))
+                            det_cfg.get("flip", True), det_cfg.get("color_verify"),
+                            sure_score=det_cfg.get("sure_score", 0), motion_min=det_cfg.get("motion_min", 5))
 
 
 class AsyncWriter:
@@ -211,6 +212,8 @@ def main(argv=None):
             d = d.setdefault(part, {})
         d[k.split(".")[-1]] = yaml.safe_load(v)   # 类型按 YAML 解析：true/3/0.5/字符串
         print(f"[cfg] 覆盖 {k} = {d[k.split('.')[-1]]!r}")
+    # OpenCV 线程数：ROI 只有 300x90，matchTemplate 多线程切不开，8 线程(默认)只是线程池空转——实测帧率一样、CPU 241% vs 2 线程 148%
+    cv2.setNumThreads(int((cfg.get("app") or {}).get("cv_threads", 2)))
     source = args.source if args.source is not None else cfg["camera"]["source"]
     if isinstance(source, str) and os.path.exists(source):
         source = os.path.abspath(source)  # 视频文件；摄像头编号/名称关键字原样交给 FrameSource
@@ -255,6 +258,7 @@ def main(argv=None):
 
     det_cfg = cfg["detection"]
     detector = build_detector(monster, det_cfg)
+    det_skip = max(1, int(det_cfg.get("idle_skip", 1)))   # 没怪时每 N 帧才跑一次模板匹配（主开销，21 ms/帧）；一有命中立刻恢复逐帧
     roi_provider = ROIProvider(cfg["roi"], out_w, out_h)
     mm_cfg = cfg.get("minimap") or {}
     minimap = MinimapTracker(mm_cfg, out_w, out_h) if mm_cfg.get("enabled", True) else None
@@ -316,7 +320,10 @@ def main(argv=None):
             actuator = DryRunActuator(log=lambda m: print(m) if src.is_file else None)
             print("[ctl] dry-run：只打日志不发按键。按 p 暂停/恢复")
         decision = Decision(ctl_cfg, actuator)
-    print("[app] 按键: q 退出 | 空格 暂停 | m 切换怪物 | t 新增模板 | c 重新标定 | r 录制 | p 暂停/恢复控制")
+    if args.no_show:
+        print("[app] 无窗口模式：Ctrl+C 停止（自动松开全部按键）" + (f"，或到 {args.seconds:.0f} s 自动停" if args.seconds else ""))
+    else:
+        print("[app] 按键: q 退出 | 空格 暂停 | m 切换怪物 | t 新增模板 | c 重新标定 | r 录制 | p 暂停/恢复控制")
     writer = None
     if args.record:
         os.makedirs("recordings", exist_ok=True)
@@ -346,6 +353,7 @@ def main(argv=None):
             game = rect(frame)
             rois = roi_provider.rois(game)
             bg_dx = roi_provider.measure_scroll(game)   # 背景滚动量（P9 卡住检测：人不动+背景不动 才算卡）
+            diff = roi_provider.motion_diff(game)       # 本帧-上一帧（按 bg_dx 对齐）灰度差：中分候选的运动门槛
             mm = minimap.locate(game) if minimap is not None else None   # 小地图黄点（相对缩略图左上角）
             world_x = lm_fix = None
             if tracker is not None:
@@ -355,18 +363,26 @@ def main(argv=None):
                     lm_fix = tracker.fix_with_landmarks(cv2.cvtColor(game, cv2.COLOR_BGR2GRAY))
                     if lm_fix is not None:
                         world_x = tracker.world_x
-            best = {"score": -1.0, "loc": None, "template": None, "raw": False, "color_dist": None, "edge_score": None, "verified": False}
+            best = {"score": -1.0, "loc": None, "template": None, "raw": False, "color_dist": None, "edge_score": None, "motion": None, "verified": False}
             best_roi = None
-            for name, (x1, y1, x2, y2) in rois:
-                r = detector.detect(game[y1:y2, x1:x2])
-                if r["score"] > best["score"]:
-                    best, best_roi = r, (name, (x1, y1, x2, y2))
-            detected = debouncer.update(best["raw"])
+            # 空闲跳帧：去抖窗口里一次都没命中（附近没怪）时每 det_skip 帧检测一次；窗口里有命中就逐帧，首次发现最多晚 1 帧
+            det_skipped = det_skip > 1 and not debouncer.state and not any(debouncer.window) and src.frame_index % det_skip != 0
+            if not det_skipped:
+                for name, (x1, y1, x2, y2) in rois:
+                    r = detector.detect(game[y1:y2, x1:x2], diff=None if diff is None else diff[y1:y2, x1:x2])
+                    if r["score"] > best["score"]:
+                        best, best_roi = r, (name, (x1, y1, x2, y2))
+                detected = debouncer.update(best["raw"])
+            else:
+                detected = debouncer.state
             # 怪到玩家的水平距离（矫正后像素）：用于判断先接近还是直接攻击
             dist = None
+            side = best_roi[0] if best_roi else None
             if best_roi and best["loc"] and roi_provider.last_player:
                 (x1, _, x2, _), (lx, _, lw, _) = best_roi[1], best["loc"]
                 dist = abs((x1 + lx + lw / 2) - roi_provider.last_player[0])
+                if side == "both":   # 两侧 ROI 合并过：按候选位置定它在哪一侧
+                    side = "right" if (x1 + lx + lw / 2) >= roi_provider.last_player[0] else "left"
             ctl_state = None
             if decision is not None:
                 px_now = roi_provider.last_player[0] if roi_provider.last_player else None
@@ -380,7 +396,7 @@ def main(argv=None):
                     x_for_patrol = world_x if (tracker is not None and tracker.localized) else None
                 else:
                     x_for_patrol = px_now
-                ctl_state = decision.update(player_ok, detected, best_roi[0] if best_roi else None, dist,
+                ctl_state = decision.update(player_ok, detected, side, dist,
                                             player_x=x_for_patrol, bg_dx=bg_dx)
                 if decision.stuck and not was_stuck:
                     print(f"[ctl] STUCK #{decision.stuck_count}: 按着 {decision.held} 但 x={px_now} 不动、背景不滚（第 {src.frame_index} 帧）")
@@ -391,8 +407,8 @@ def main(argv=None):
             rec = {"timestamp": round(time.time(), 3), "frame": src.frame_index, "monster": monster,
                    "detected": detected, "raw": best["raw"], "score": round(best["score"], 4),
                    "template": best["template"], "color_dist": best.get("color_dist"), "edge_score": best.get("edge_score"), "verified": best.get("verified"),
-                   "roi": best_roi[1] if best_roi else None,
-                   "side": best_roi[0] if best_roi else None, "facing": roi_provider.current_facing,
+                   "roi": best_roi[1] if best_roi else None, "motion": best.get("motion"),
+                   "side": side, "facing": roi_provider.current_facing,
                    "player": roi_provider.last_player, "player_score": round(roi_provider.player_score, 3),
                    "dist": None if dist is None else round(dist), "ctl": ctl_state,
                    "held": decision.held if decision else None,
@@ -402,6 +418,8 @@ def main(argv=None):
                    "lm_fix": lm_fix, "localized": tracker.localized if tracker else None, "mm": mm,
                    "cmds": (decision.act.frame_cmds[:] or None) if decision else None,
                    "latency_ms": round(latency_ms, 2)}
+            if det_skipped:
+                rec["det_skipped"] = True   # 本帧没跑模板匹配（空闲跳帧），score/raw 不代表画面里没怪
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             if decision is not None:
                 decision.act.frame_cmds.clear()
@@ -496,6 +514,8 @@ def main(argv=None):
                 rest = frame_period - (time.perf_counter() - t_loop)
                 if rest > 0:
                     time.sleep(rest)
+    except KeyboardInterrupt:
+        print("\n[app] Ctrl+C，停止（松开全部按键）")   # 无窗口模式的正常退出方式
     finally:
         if decision is not None:
             decision.close()  # RELEASE_ALL

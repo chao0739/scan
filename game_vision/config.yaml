@@ -8,6 +8,11 @@ camera:
   loop_video: false    # 视频文件播放到结尾是否循环
   ndi_transport: tcp   # NDI 传输：tcp（实测唯一能出图的）/ auto（libndi 默认，优先 RUDP，本网上收不到帧）
 
+app:                   # 菜单「开始检测」的运行方式（命令行等价：--no-show / --seconds N）
+  show: true           # 运行时显示画面窗口。false=不开窗口（省 CPU；Ctrl+C 或到时自动停）
+  run_seconds: 0       # 运行多少秒后自动停止；0=不限
+  cv_threads: 2        # OpenCV 线程数。ROI 很小，多线程没收益只烧 CPU（8 线程 CPU 241%、2 线程 148%，帧率相同）；矫正 resize 用得上 2 个
+
 minimap:               # 左上角小地图黄点 = 玩家绝对地图位置（minimap.py）。巡逻端点 mode=minimap 时用它，不受镜头跟随/宠物遮挡影响
   enabled: true
   region: [0, 0, 400, 260]   # 小地图窗口大致范围（矫正后画面坐标，要把整个窗口含右/下边框框进来）；缩略图区域在其中按边框颜色自动找
@@ -34,6 +39,9 @@ roi:
     local_threshold: 0.5       # 局部跟踪阈值
     track_window: 120          # 跟踪搜索窗口半径(px)
     lost_max: 5                # 连续丢失多少帧后全局重搜
+    global_coarse_scale: 0.5   # 全局重搜「粗到精」：搜索带缩到 0.5 倍找 top-K 峰，再全分辨率精修。1280x470 全分辨率 11 ms -> 2.7 ms/次；0 = 关（老行为）
+    global_coarse_topk: 20     # 粗峰取前几个精修（每个 ~0.05 ms）：5 个会漏掉 2% 的帧，20 个基本无漏
+    global_coarse_margin: 8    # 精修窗口：粗峰位置 ±这么多像素
     # 中间层：小窗跟丢后先在上一位置 ±mid_window 内找，>=mid_threshold 就接受（位置连续性）。
     # 屏幕边缘的真名牌只有 0.67~0.76，够不到全局阈值；假名牌分数与之重叠，只能靠位置区分。0 关闭。
     edge_threshold: 0.72       # 屏幕最左/最右名牌被切掉一半时，用半张模板在边缘窄条里找（0 关闭）
@@ -69,7 +77,10 @@ roi:
 
 detection:
   method: template_matching
-  threshold: 0.55      # 模板分阈值。开了 color_verify 后可以放低（候选由颜色校验把关）；不开时需 ~0.78+
+  threshold: 0.5       # 候选下限：低于此分的候选不看。开了 color_verify + 运动门槛后可以放到 0.5；不开时需 ~0.78+
+  sure_score: 0.65     # ≥ 此分直接接受；threshold~sure_score 之间的候选还要求「框里在动」（下一项）。0=关运动门槛
+  motion_min: 5        # 候选框内与上一帧（按背景滚动对齐后）的平均灰度差下限。实测走动/被打的怪 15~60，岩壁纹理 0~3，
+                       # 发呆不动的怪 0~4（这类中分怪会漏，和只用 0.65 时一样；高分的照常接受）
   scales: [1.0]        # 多尺度匹配，如 [0.9, 1.0, 1.1]
   grayscale: true
   flip: true           # 模板水平翻转增强（覆盖怪物左右朝向）
@@ -78,6 +89,7 @@ detection:
     max_dist: 0.48     # Bhattacharyya 距离上限。woniu 标注集：无怪候选最小 0.46，有怪多在 0.27~0.48（余量薄，多采数据后重标）
     edge_min: 0.4      # 候选框与模板在 Sobel 边缘图上的匹配分下限（怪物有粗黑轮廓；灌木/天空假框实测 ≤0.29）
     topk: 3            # 每张模板检查前几个峰（第一个峰常是假框，真怪可能排第二）
+  idle_skip: 2         # 空闲跳帧：去抖窗口内一次都没命中时每 N 帧才跑一次模板匹配（主开销 ~21 ms/帧减半）；一有命中立刻逐帧，首次发现最多晚 1 帧。1=每帧都跑
 
 debounce:
   window_size: 5

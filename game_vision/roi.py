@@ -82,6 +82,8 @@ class ROIProvider:
         # measure_scroll：每帧背景水平滚动量（相位相关，平台/树这一层，避开 HUD 和视差天空），P9 卡住检测用
         self.scroll_band = cfg.get("scroll_band", [0, 350, frame_w, 650])
         self._prev_scroll = None
+        self.last_gray = None      # 本帧灰度图（locate_player 算过的，motion_diff 复用）
+        self._prev_gray = None
         if self.mode == "player":
             pc = cfg["player"]
             self.tpl = cv2.imread(pc["template"], cv2.IMREAD_GRAYSCALE)
@@ -103,6 +105,12 @@ class ROIProvider:
             th, tw = self.tpl.shape
             self._tpl_r, self._tpl_l = self.tpl[:, tw // 2:], self.tpl[:, :tw - tw // 2]
             self.adx, self.ady = pc.get("anchor_dx", 0), pc.get("anchor_dy", 0)
+            # 全局重搜「粗到精」：搜索带缩到 global_coarse_scale 找前 topk 个峰，每个峰附近 ±margin 用整张模板精修（分数语义不变）。
+            # 实测 1280x470 全分辨率 11 ms/次 -> 0.5 倍 2.7 ms/次；topk=20 时 620 帧只漏 1 帧(分数 0.716 刚过阈值)，丢失期间每帧都重搜，下一帧即补上。0 = 关
+            self.coarse_scale = float(pc.get("global_coarse_scale", 0.5))
+            self.coarse_topk, self.coarse_margin = int(pc.get("global_coarse_topk", 20)), int(pc.get("global_coarse_margin", 8))
+            self._tpl_small = (cv2.resize(self.tpl, None, fx=self.coarse_scale, fy=self.coarse_scale, interpolation=cv2.INTER_AREA)
+                               if self.coarse_scale > 0 else None)
 
     def _match(self, gray, x1, y1, x2, y2):
         th, tw = self.tpl.shape
@@ -118,6 +126,37 @@ class ROIProvider:
         res = cv2.matchTemplate(sub, self.tpl, cv2.TM_CCOEFF_NORMED)
         _, mx, _, loc = cv2.minMaxLoc(res)
         return float(mx), (x1 + loc[0], y1 + loc[1])
+
+    def _match_coarse(self, gray, x1, y1, x2, y2):
+        """大范围搜索用的 _match：缩小后找前 topk 个峰，各自在全分辨率上 ±margin 精修，返回精修分最高者。返回值同 _match。"""
+        if self._tpl_small is None:
+            return self._match(gray, x1, y1, x2, y2)
+        th, tw = self.tpl.shape
+        bx1, by1, bx2, by2 = self.band
+        x1, y1, x2, y2 = max(x1, bx1), max(y1, by1), min(x2, bx2), min(y2, by2)
+        if x2 - x1 < tw or y2 - y1 < th:
+            return 0.0, None
+        sub = gray[y1:y2, x1:x2]
+        s = self.coarse_scale
+        small = cv2.resize(sub, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+        sh, sw = self._tpl_small.shape
+        if small.shape[0] < sh or small.shape[1] < sw:
+            return self._match(gray, x1, y1, x2, y2)
+        res = cv2.matchTemplate(small, self._tpl_small, cv2.TM_CCOEFF_NORMED)
+        best, best_xy, m = 0.0, None, self.coarse_margin
+        for _ in range(self.coarse_topk):
+            _, mx, _, (sx, sy) = cv2.minMaxLoc(res)
+            if mx <= 0:
+                break
+            fx, fy = int(round(sx / s)), int(round(sy / s))
+            wx1, wy1 = max(0, fx - m), max(0, fy - m)
+            wx2, wy2 = min(sub.shape[1], fx + tw + m), min(sub.shape[0], fy + th + m)
+            if wx2 - wx1 >= tw and wy2 - wy1 >= th:
+                _, fm, _, (lx, ly) = cv2.minMaxLoc(cv2.matchTemplate(sub[wy1:wy2, wx1:wx2], self.tpl, cv2.TM_CCOEFF_NORMED))
+                if fm > best:
+                    best, best_xy = float(fm), (x1 + wx1 + lx, y1 + wy1 + ly)
+            res[max(0, sy - sh // 2):sy + sh // 2 + 1, max(0, sx - sw // 2):sx + sw // 2 + 1] = -1   # 压掉该峰再找下一个
+        return best, best_xy
 
     def _edge_search(self, gray):
         """屏幕左右边缘窄条里匹配半张模板。返回等效的整张模板左上角（可能在画面外），找不到 None。"""
@@ -140,6 +179,7 @@ class ROIProvider:
     def locate_player(self, game_frame):
         """先在上一位置附近跟踪，连续丢失后再全局搜索；丢失期间沿用上一位置。"""
         gray = cv2.cvtColor(game_frame, cv2.COLOR_BGR2GRAY)
+        self.last_gray = gray
         th, tw = self.tpl.shape
         found = None
         if self._tpl_xy is not None:
@@ -162,7 +202,7 @@ class ROIProvider:
             self.lost_frames += 1
             if self._tpl_xy is None or self.lost_frames > self.lost_max:
                 bx1, by1, bx2, by2 = self.band
-                mx, loc = self._match(gray, bx1, by1, bx2, by2)
+                mx, loc = self._match_coarse(gray, bx1, by1, bx2, by2)   # 全局重搜（1280x470）：粗到精，11 ms -> ~3 ms
                 self.player_score = mx
                 if mx >= self.pthr:
                     found = loc
@@ -207,6 +247,27 @@ class ROIProvider:
         self._prev_scroll = small
         return self.bg_dx
 
+    def motion_diff(self, game_frame):
+        """本帧与上一帧的灰度绝对差图（上一帧先按本帧背景滚动量 bg_dx 平移对齐，所以镜头在动时静止背景差也≈0）。第一帧返回 None。
+        给 detector 做运动门槛：棕色岩壁纹理能拿到 0.5~0.63 的模板分并通过颜色/边缘校验（野猪本身就是棕灰色），但它不动；
+        走动/被打的怪在候选框内平均差 15~60，岩石 0~3（2026-08-28 harvest_yezhu 585 个 ROI 人工核对）。
+        平移后露出的边条用本帧填充 -> 差 0：屏幕边缘刚进来的中分怪会当静止拒掉，进屏几帧后即正常。"""
+        gray = self.last_gray if (self.mode == "player" and self.last_gray is not None) else cv2.cvtColor(game_frame, cv2.COLOR_BGR2GRAY)
+        prev, self._prev_gray = self._prev_gray, gray
+        if prev is None or prev.shape != gray.shape:
+            return None
+        dx = int(round(self.bg_dx))
+        w = gray.shape[1]
+        if dx == 0:
+            shifted = prev
+        else:
+            shifted = gray.copy()
+            if dx > 0:
+                shifted[:, dx:] = prev[:, :w - dx]
+            else:
+                shifted[:, :w + dx] = prev[:, -dx:]
+        return cv2.absdiff(gray, shifted)
+
     def set_facing_hint(self, facing):
         """由决策模块的按键状态直接给出朝向（比位移估计更可靠）。"""
         if facing in ("left", "right") and facing != self.current_facing:
@@ -239,4 +300,8 @@ class ROIProvider:
             r = clamp_rect(px - c["far_offset"], py - c["up"], px - c["near_offset"], py + c["down"], self.w, self.h)
             if r:
                 out.append(("left", r))
+        if len(out) == 2 and out[0][1][0] < out[1][1][2] and out[1][1][0] < out[0][1][2]:
+            # near_offset<0（框跨过角色）时两侧矩形重叠：合成一个，免得同一块区域匹配两遍。怪在哪一侧由 app 按候选位置判断
+            (_, a), (_, b) = out
+            out = [("both", (min(a[0], b[0]), a[1], max(a[2], b[2]), a[3]))]
         return out
