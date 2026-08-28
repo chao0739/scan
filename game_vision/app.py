@@ -110,7 +110,9 @@ def build_detector(monster, det_cfg):
     return TemplateDetector(os.path.join(TEMPLATE_ROOT, monster), det_cfg["threshold"],
                             det_cfg.get("scales", [1.0]), det_cfg.get("grayscale", True),
                             det_cfg.get("flip", True), det_cfg.get("color_verify"),
-                            sure_score=det_cfg.get("sure_score", 0), motion_min=det_cfg.get("motion_min", 5))
+                            sure_score=det_cfg.get("sure_score", 0), motion_min=det_cfg.get("motion_min", 5),
+                            sprite_scale=det_cfg.get("sprite_scale", 1.0), sprite_threshold=det_cfg.get("sprite_threshold", 0.6),
+                            sprite_sure=det_cfg.get("sprite_sure", 0.75), sprite_topk=det_cfg.get("sprite_topk", 4))
 
 
 class AsyncWriter:
@@ -271,7 +273,7 @@ def main(argv=None):
     log_f = open(log_path, "w", encoding="utf-8")
     every_n = cfg["logging"].get("console_every_n", 15)
     print(f"[app] source={source} 实际分辨率={src.width}x{src.height} fps={src.fps:.0f} monster={monster} "
-          f"templates={len(detector.templates)} log={log_path}")
+          f"templates={len(detector.templates)}+精灵{len(detector.sprites)} log={log_path}")
     # ---- 控制（P5/P6）----
     ctl_cfg = dict(cfg.get("control") or {})
     ctl_mode = args.control or ctl_cfg.get("mode", "off")

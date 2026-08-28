@@ -81,6 +81,13 @@ detection:
   sure_score: 0.65     # ≥ 此分直接接受；threshold~sure_score 之间的候选还要求「框里在动」（下一项）。0=关运动门槛
   motion_min: 5        # 候选框内与上一帧（按背景滚动对齐后）的平均灰度差下限。实测走动/被打的怪 15~60，岩壁纹理 0~3，
                        # 发呆不动的怪 0~4（这类中分怪会漏，和只用 0.65 时一样；高分的照常接受）
+  # 原版精灵图模板（tools/wz_sprites.py 从客户端 aa/ 包导出、带透明通道的 png，文件名 wz_<怪物id>_<帧>.png）：只比精灵像素，
+  # 背景是什么都不影响分数——实测真怪 0.85~0.94，背景 ≤0.6，被雾/技能特效遮住的怪 0.6~0.75。和手抠模板可以混放在同一个目录
+  sprite_scale: 0.93     # 精灵在矫正后画面里的缩放比（`python tools/wz_sprites.py scale --mob 2230102 --source 录像` 标定；本机 0.93，偏 0.03 分就掉 0.1）
+  sprite_threshold: 0.6  # 精灵图候选下限；threshold~sure 之间要求候选框在动（motion_min）
+  sprite_sure: 0.75      # ≥ 此分直接接受
+  sprite_topk: 4         # 两阶段匹配：0.5 倍粗找后取前几个候选到全分辨率精修
+
   scales: [1.0]        # 多尺度匹配，如 [0.9, 1.0, 1.1]
   grayscale: true
   flip: true           # 模板水平翻转增强（覆盖怪物左右朝向）
@@ -146,3 +153,6 @@ control:                 # P5/P6：检测结果 -> 按键（decision.py）
 logging:
   dir: logs
   console_every_n: 15
+
+wz:                    # 游戏客户端 Unity Addressables 资源目录（含 catalog.bin 和 w/*.bundle），tools/wz_sprites.py 用
+  aa_dir: /home/cc/scan/aa

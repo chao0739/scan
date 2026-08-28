@@ -14,3 +14,6 @@ game_vision/settings.yaml
 # 模板去重工具移出的近似重复模板（可用工具移回）
 game_vision/templates/*/_dup/
 game_vision/calibration/landmarks/
+
+# 游戏客户端 Unity Addressables 资源（2.2 GB，tools/wz_sprites.py 只读它）
+aa/

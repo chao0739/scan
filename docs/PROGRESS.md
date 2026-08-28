@@ -1,6 +1,7 @@
 # 项目进展记录
 
-更新于 2026-08-27 下午。**里程碑 M2：端点巡逻 + 攻击区打怪 真机闭环稳定（10 min 57 个来回，LOST 0%，无卡键/断连/崩溃）。**
+更新于 2026-08-28 晚。**里程碑 M2：端点巡逻 + 攻击区打怪 真机闭环稳定（10 min 57 个来回，LOST 0%，无卡键/断连/崩溃）。**
+2026-08-28 晚：性能（30 fps 零掉帧、CPU 240%→134%）、NDI 内存泄漏（三次 OOM 的根因）修复、识别率（运动门槛 + **原版精灵图 masked 匹配**，录像命中帧 319→1106）落地；精灵图真机待验（§〇 2026-08-28 晚）。
 路线图见根目录《2D横版视觉自动控制系统_由浅入深开发路线_v1.0.md》，本文件按其阶段编号（P0–P16）记录。
 
 ## 〇、当前状态一览
@@ -15,20 +16,20 @@ B 电脑(Windows, 冒险岛) --OBS DistroAV NDI 输出--> 局域网 --NDI(TCP)--
 | 路线图阶段 | 状态 | 说明 |
 |---|---|---|
 | P1–P3 Pico HID / 复合 / Wi-Fi | ✅ | CircuitPython P1 固件在 Pico 上；**v1 固件收不了连发包**（见 §二.1），A 端已规避，v2 固件已写好待烧 |
-| P4 视频输入 | ✅ | **NDI** `ndi:Game-PC` 1920×1080@30，全流程 25 fps / 单帧 25 ms（§一.NDI）。旧：Insta360 `/dev/video2` 1080p MJPG ≈29 fps |
+| P4 视频输入 | ✅ | **NDI** `ndi:Game-PC` 1920×1080@30，**30.0 fps 零掉帧、进程 CPU 134%、最大常驻 147 MB**（2026-08-28 晚：cv_threads=2 + 名牌粗到精 + 空闲跳帧 + 泄漏修复）。旧：Insta360 `/dev/video2` 1080p MJPG ≈29 fps |
 | P5 离线数据 | ✅ | `recordings/rec_20260827_114043.mp4`（168 s，用户手动走全图）+ 标定副本 `homography_rec_20260827_114043.json`；真机运行可 `--record` |
 | P6 玩家定位 | ✅ | 名牌模板三层搜索（小窗 → 中间层 → 全局）+ 边缘半模板；真机 score 中位 0.92，LOST 0% |
 | P7 端点巡逻 | ✅ | 菜单现场标端点（CAM 指示镜头是否顶住），按地图存 settings `patrol.<怪物>`。两种坐标：屏幕(默认)/地图(见 §一.10) |
 | P8 左右闭环 | ✅ | 真机 150 s 15 个来回，单趟 4.0 s |
 | P9 卡住检测 | ✅ | 按着方向键 1.5 s 人不动且背景不滚 → `stuck`（日志/画面/终端） |
 | P10 跳跃恢复 | ✅ | 卡住 → 按着方向键跳；3 次无效 → 掉头并 4 s 内不许端点逻辑翻回。矮台阶有效，高墙无效（靠掉头脱困） |
-| P11–P13 攻击区/滤波/攻击决策 | ✅ | ROI = 玩家前方 20–140 px（只看前进方向）；模板+颜色+边缘三道校验；5 帧去抖；检测到即站着打 |
+| P11–P13 攻击区/滤波/攻击决策 | ✅ | ROI = 玩家前方 0–220 px 同一层（菜单拖框可改）；**原版精灵图 masked 两阶段匹配**（yezhu，真怪 0.85–0.94）/ 手抠模板 + 颜色 + 边缘 + 运动门槛（其他图）；5 帧去抖；检测到即站着打 |
 | P14 完整闭环稳定性 | ✅ 10 min | `run_20260827_133139`：600 s 57 个来回，单趟中位 4.8 s / p90 7.2 s，LOST 0%，STUCK 5 次（全在南港路牌前，跳一下自行恢复），29.8 fps，帧间隔 p99 50 ms。30 min 待跑 |
-| P15 日志与指标 | ✅ | JSONL 每帧字段齐全；`tools/analyze_run.py`（趟数/STUCK/LOST 统计）、`tools/event_frames.py`（事件帧拼图）、`tools/crops.py`（玩家周围小图条带） |
+| P15 日志与指标 | ✅ | JSONL 每帧字段齐全；`tools/analyze_run.py`（趟数/STUCK/LOST 统计）、`tools/event_frames.py`（事件帧拼图）、`tools/crops.py`（玩家周围小图条带）、`tools/wz_sprites.py`（从客户端 aa/ 导出怪物精灵图模板） |
 | P16 鲁棒性 | 部分 | 玩家丢失→松键、Pico 心跳超时→RELEASE_ALL、退出→RELEASE_ALL 已有；摄像头位移无检测 |
 
-用户当前设置（`settings.yaml`）：画面 **`ndi:Game-PC`**（tcp）/ 玩家 **keee** / 怪物 **shuren**（新地图）/ `facing key` / `far_offset 140` / `approach false` /
-`jump_on_stuck true` / 端点 279–937（screen）/ mode pico / 攻击 ctrl 每 100 ms / 拾取 z 每 0.5–1 s。
+用户当前设置（`settings.yaml`，2026-08-28 晚）：画面 **`ndi:Game-PC`**（tcp）/ 玩家 **KEEEE** / 怪物 **yezhu**（野猪的领土：野猪 2230102 + 斧木妖 1130100，精灵图模板）/ `facing key` /
+检测框 `0~220 × 上 70 / 下 20` / `threshold 0.5 + sure_score 0.65` / `sprite_scale 0.93` / `approach false` / `jump_on_stuck true` / 端点 minimap 20–142 / mode pico / 攻击 ctrl 每 100 ms / 拾取 z。
 （2026-08-28 画面来源换成 NDI：自动标定、名牌模板在新画面重抠（40×16，anchor 20/14，实机 292 帧分 0.999–1.0、丢失 0%）。
 **怪物 shuren 模板仍是相机画面抠的，未在 NDI 画面验证；巡逻端点 279–937 是相机时代标的，NDI 画面缩放略不同，建议重标。**）
 
@@ -72,6 +73,30 @@ B 电脑(Windows, 冒险岛) --OBS DistroAV NDI 输出--> 局域网 --NDI(TCP)--
 - 怪物 shuren 模板：相机时代的 10 张在清晰画面上最高 0.78 且位置全错 → 移到 `templates/shuren/_cam_20260827/`，从 NDI 画面抠 3 张种子 + 25 s 自动采集 15 张（全部人工核过是树桩），ROI 内检出分 0.88–0.93。
 - 这张图（勇士部落东入口）地形：上层平台（y≈360–400）有树桩；右侧凸起地面（y≈380）与下层传送门地面（y≈451）之间有一段约 90 px 的崖壁，
   从下层往左走会顶在崖壁上（跳 3 次才上去/掉头）；左端镜头顶住区 x<350 掉头正常；右端点 937 三轮都没走到（右侧一直是镜头跟随区）。
+
+### 2026-08-28 下午–晚：性能、内存泄漏、识别率、原版精灵图
+1. **单帧开销剖析**（`harvest_yezhu.mp4` 1152 帧 + cProfile，i5-8250U）：模板匹配 21 ms（70%，42 次 matchTemplate）、名牌定位 4.5 ms（丢失后全局重搜 11–16 ms/次）、
+   读帧 2、矫正 1–3、背景滚动 1、其余 <0.5；合计 ~30 ms ≈ 帧周期 → 真机 25.4 fps、p90 54 ms、CPU ~240%。
+   三项优化（默认开，录像回归 raw/detected/player 逐帧一致）：`app.cv_threads: 2`（ROI 太小，8 线程只是线程池空转：CPU 241%→148%，帧率相同）；
+   名牌全局重搜**粗到精**（`roi.player.global_coarse_scale 0.5 / topk 20`：11 ms→3.7 ms，620 帧漏 1 帧且下一帧补上）；`detection.idle_skip: 2`（去抖窗口无命中时隔帧检测，首次发现最多晚 1 帧）。
+   真机 60 s：**30.0 fps 零掉帧、CPU 134%**。试过不值：OpenCL/MX150（30 ms 比 CPU 20 ms 还慢）、再删模板（两两相似 <0.75 已无冗余）。
+2. **内存泄漏 = 今天三次 OOM（14:20、14:28、19:36）的根因，症状「跑一会儿卡住然后退出」**：cyndilib `FrameSync.capture_video()` 每调一次拿一个 NDI 帧引用，
+   只在缓冲区视图释放时 free（`get_array` 内部会做）；`read()` 等新帧的 2 ms 轮询不取数据就不释放 → 每帧漏 8 MB，1–5 分钟吃光 16 GB + 4 GB swap，进程换页假死后被杀。
+   优化提速后轮询更勤、泄漏更快（~1.5 min）。修：`camera.py` 同一帧时 `memoryview(vf).release()`；90 s 最大常驻 147 MB。查法 `journalctl -k | grep "Out of memory"`。
+3. **菜单**：「设置→运行方式」不开窗口 + 自动停（`app.show/run_seconds`，Ctrl+C 退出松键）；「设置→检测范围」在画面上拖框（按脚底换算 near/far/up/down，左右镜像，`live_freeze_and_drag` 加 overlay）；
+   「匹配阈值」改为 threshold + sure_score；「怪物模板→从游戏原版精灵图导入」。
+4. **识别率不高的根因**（585 个 ROI 拼图人工核对）：棕色岩壁前灰度 NCC 分不开——岩石 0.50–0.63 **且通过颜色/边缘校验**（野猪本身棕灰），真野猪只有 0.52–0.68；
+   灰岩/天空背景则很干净（真 0.70–0.92、假 ≤0.64 被颜色否）。彩色 NCC、直方图收紧都无效（分布重叠）。用户曾把阈值调到 0.65/0.67 躲误报，ATTACK 帧命中只 62%。
+   有效：**中分候选运动门槛**（`threshold 0.5 / sure_score 0.65 / motion_min 5`；`roi.motion_diff` 用 bg_dx 对齐上一帧，镜头滚动时静止背景差≈0）：命中帧 319→576，新增 24/24 真怪；
+   发呆不动的中分怪仍漏（与 0.65 时同）。另外检测框曾被拖成 `-201~219 × 上 135`：上层平台的怪被框进（站在下面打够不着的）、两侧 ROI 重合算两遍 → 改回 `0~220 × 70/20`，重合 ROI 自动合并（`side` 按候选位置判）。
+5. **根治：原版精灵图**。用户拷来客户端资源 `/home/cc/scan/aa`（Unity Addressables，UnityFS/LZ4，Unity 6000.3，未加密）。Mob 图集在 `spritesheet_d104….bundle`
+   （`SpriteSheet/CN/Mob/<id>_0.png` RGBA32 + `<id>.wzspritesheet` MonoBehaviour），858 种怪；包解压 8.8 GB，整包载入被 OOM 杀 → `tools/wz_sprites.py` 只按需解压 LZ4 块（BundleReader）。
+   帧矩形表在 MonoBehaviour 原始字节里（无 typetree，按「最长一串合法 (x,y,w,h)」找，**y 从图集底部量**）。野猪 = 2230102、斧木妖 = 1130100（树桩 0130100、黑斧木妖 1140100、绿蘑菇 1110100、蘑菇 2230101）。
+   `detector.py`：带透明通道的 `wz_*.png` 走 **masked 匹配**——OpenCV masked matchTemplate 是朴素实现（42 变体 205 ms/ROI），做成两阶段（0.5× 粗找 → 前 4 个候选全分辨率精修）35 ms/ROI，与穷举分差 ≤0.02 的 94%。
+   缩放比 `detection.sprite_scale` **0.93**（偏 0.03 分掉 0.1；`wz_sprites.py scale` 标定）；`sprite_threshold 0.6 / sprite_sure 0.75`，之间要求运动。
+   录像：真怪 **0.85–0.94**、背景 ≤0.6，命中帧 576→**1106**，≥0.75 抽样无误报（岩壁/宠物/金币/木墙都不再误报）；漏：被宠物/角色挡住大半、被闪电特效盖住的怪（<0.6，手抠+运动门槛反而能认）。
+   `templates/yezhu/` 现为 15 张精灵帧（野猪 12 去重到 6 + 斧木妖 9），手抠 30 张归档 `_manual/`。**真机 pico 模式尚未验证。**
+6. 坑：一次编辑把 `wz:` 段插进 `config.yaml` 的 `detection:` 中间，`scales/flip/color_verify/idle_skip` 掉出 detection（跳帧失效、手抠模板无校验）→ 已修；改 config 后用 `app.load_config` 核对键。
 
 ## 一、2026-08-27 做了什么（按时间）
 
@@ -120,8 +145,15 @@ B 电脑(Windows, 冒险岛) --OBS DistroAV NDI 输出--> 局域网 --NDI(TCP)--
    名牌半透明，背后地图滚动时个别帧会掉到 0.6，靠局部跟踪(0.65)+中间层+5帧去抖兜住，无需降全局阈值。验证脚本见 `scratchpad/val_pipeline.py`。
 6. **踩过的坑**：`timeout -s INT` 和不带锚的 `pkill -f "app.py ..."` 都会杀掉工具 shell 自己（用 `--seconds` 或 `pkill -f "^python3 app.py"`）；
    实机标定覆盖 `homography.json` 会让旧录像全错位（每段录像配自己的标定副本，`--calib` 指定）；被打闪白帧不能做模板。
+7. **NDI 读帧**：cyndilib frame-sync 的 `capture_video()` 必须配对释放（同帧轮询要 `memoryview(vf).release()`），否则每帧漏 8 MB → OOM。「跑一会儿卡住退出」先 `journalctl -k | grep "Out of memory"`。
+8. **精灵图模板**：缩放比 0.93 只对当前窗口/OBS 设置有效，改了要 `tools/wz_sprites.py scale` 重标；检测框高度要 ≥ 最高精灵帧（斧木妖 93×0.93≈87 px，up 70 + down 20 刚好）；
+   不要把上层平台框进检测框（up ≤ 70）。别再试：彩色 NCC、颜色直方图收紧、OpenCL——都验证过无效。
+9. **回归方法**：`python app.py --source recordings/xxx.mp4 --monster <集> --no-show --control off --set logging.dir=<scratch>` 前后各跑一次逐帧比 raw/detected/player；
+   看识别效果用 ROI 切片按 score/motion 拼 contact sheet 人工核对（每次都靠这个发现问题）。
 
 ## 三、下一步
+0'. **精灵图模板真机验证**（pico 模式跑 5–10 min：ATTACK 帧 `raw` 比例应 >85%，看有无打岩石/打宠物；不行先把 `sprite_sure` 提到 0.8）；其他地图用菜单「从游戏原版精灵图导入」+ 重标端点即可。
+   被宠物挡住的怪：把几张手抠模板放回目录混用，或游戏里隐藏宠物名。masked 匹配再提速可走 FFT 版 masked NCC（现 35 ms/ROI）。
 0. **NDI 切换后的收尾**：(a) B 机把游戏窗口点回前台，再实机开车确认 Pico 按键到达；(b) 角色到 shuren 地图后验证/重抠怪物模板（相机时代的模板在清晰画面上分数未知）；
    (c) 重标 shuren 端点（画面缩放变了）；(d) 跑一轮 `app.py --seconds 120` 完整闭环。
 1. 地图坐标模式实机验证：用户在菜单「巡逻端点」标一次带地标的端点（角色在正常平台上、不在坑里），选「地图坐标」，跑一轮看 world_x 掉头是否恒定、地标校准修正量。

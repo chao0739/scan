@@ -25,13 +25,19 @@ def hs_hist(bgr, h_bins=18, s_bins=8):
 
 class TemplateDetector:
     def __init__(self, template_dir, threshold=0.7, scales=(1.0,), grayscale=True, flip=True, color_verify=None,
-                 sure_score=0.0, motion_min=5.0):
+                 sure_score=0.0, motion_min=5.0, sprite_scale=1.0, sprite_threshold=0.6, sprite_sure=0.75, sprite_topk=4):
         """color_verify: None/False 关闭；或 dict(max_dist=0.48, edge_min=0.4, topk=3, h_bins=18, s_bins=8)。
         edge_min: 候选框与模板在 Sobel 边缘图上的匹配分下限（0 关闭）。
         sure_score/motion_min: 运动门槛（只在开了 color_verify 且 detect() 传了 diff 时生效）：模板分 ≥ sure_score 直接接受；
         threshold~sure_score 之间的候选还要求候选框内与上一帧的平均灰度差 ≥ motion_min（岩壁纹理不动，怪会动）。sure_score=0 关闭。"""
         self.threshold = threshold
         self.sure_score, self.motion_min = float(sure_score or 0), float(motion_min)
+        # 精灵图模板（tools/wz_sprites.py 从客户端导出的带透明通道 png）：只比精灵像素（masked NCC），背景是什么都不影响分数。
+        # OpenCV 的 masked matchTemplate 是朴素实现（全分辨率 42 个变体 205 ms/ROI），所以两阶段：0.5 倍粗找各变体的峰，
+        # 取总分前 sprite_topk 个到全分辨率 ±6px 精修（与穷举分差 ≤0.02 的 94%，35 ms/ROI）。
+        # 分数 ≥ sprite_sure 直接接受，sprite_threshold~sprite_sure 之间要求候选框在动（同 sure_score/motion_min 的逻辑）。
+        self.sprite_scale, self.sprite_threshold, self.sprite_sure, self.sprite_topk = float(sprite_scale), float(sprite_threshold), float(sprite_sure), int(sprite_topk)
+        self.sprites = []   # (name, gray, mask, gray_half, mask_half)
         self.scales = list(scales)
         self.grayscale = grayscale
         cv = color_verify if isinstance(color_verify, dict) else {}
@@ -45,9 +51,24 @@ class TemplateDetector:
         if not paths:
             raise RuntimeError(f"模板目录为空: {template_dir}")
         for p in paths:
-            img = cv2.imread(p, cv2.IMREAD_COLOR)
+            img = cv2.imread(p, cv2.IMREAD_UNCHANGED)
             if img is None:
                 continue
+            if img.ndim == 3 and img.shape[2] == 4 and (img[..., 3] < 128).any():   # 有透明像素 = 精灵图模板
+                sp = img if self.sprite_scale == 1.0 else cv2.resize(img, None, fx=self.sprite_scale, fy=self.sprite_scale, interpolation=cv2.INTER_AREA)
+                for name, v in ((os.path.basename(p), sp),) + (((os.path.basename(p) + "~flip", cv2.flip(sp, 1)),) if flip else ()):
+                    g = cv2.cvtColor(v[..., :3], cv2.COLOR_BGR2GRAY)
+                    m = (v[..., 3] > 128).astype(np.uint8)
+                    gh = cv2.resize(g, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+                    mh = (cv2.resize(v[..., 3], None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA) > 128).astype(np.uint8)
+                    if m.sum() < 50 or mh.sum() < 12:
+                        continue
+                    self.sprites.append((name, g, m, gh, mh))
+                continue
+            if img.ndim == 3 and img.shape[2] == 4:
+                img = np.ascontiguousarray(img[..., :3])
+            elif img.ndim == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
             for s in self.scales:
                 c = img if s == 1.0 else cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
                 variants = [(f"{os.path.basename(p)}@{s}", c)]
@@ -99,7 +120,54 @@ class TemplateDetector:
                 if mx > fallback["score"]:
                     fallback = dict(cand, verified=False)
                 res[max(0, y - th // 2):y + th // 2 + 1, max(0, x - tw // 2):x + tw // 2 + 1] = -1  # 压掉该峰再找下一个
+        if self.sprites:
+            sb, sf = self._detect_sprites(roi_m, diff)
+            if sb is not None and (best["loc"] is None or not best["verified"] or sb["score"] > best["score"]):
+                best = sb
+            elif sf is not None and best["loc"] is None and (fallback["loc"] is None or sf["score"] > fallback["score"]):
+                fallback = sf
         if best["loc"] is None and fallback["loc"] is not None:
             best = fallback
-        best["raw"] = bool(best["verified"] and best["score"] >= self.threshold)
+        thr = self.sprite_threshold if best.get("sprite") else self.threshold
+        best["raw"] = bool(best["verified"] and best["score"] >= thr)
         return best
+
+    @staticmethod
+    def _mm(res):
+        res = np.nan_to_num(res, nan=-1.0, posinf=-1.0, neginf=-1.0)   # mask 区域全同色时 NCC 是 NaN
+        _, mx, _, (x, y) = cv2.minMaxLoc(res)
+        return float(mx), x, y
+
+    def _detect_sprites(self, roi_m, diff, margin=6):
+        """精灵图模板的两阶段 masked 匹配。返回 (通过的最佳候选 或 None, 未通过的最高候选 或 None)。"""
+        half = cv2.resize(roi_m, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+        cands = []
+        for i, (name, g, m, gh, mh) in enumerate(self.sprites):
+            if gh.shape[0] > half.shape[0] or gh.shape[1] > half.shape[1]:
+                continue
+            mx, x, y = self._mm(cv2.matchTemplate(half, gh, cv2.TM_CCOEFF_NORMED, mask=mh))
+            cands.append((mx, i, x, y))
+        cands.sort(reverse=True)
+        best = fallback = None
+        for _, i, x, y in cands[:self.sprite_topk]:
+            name, g, m, _, _ = self.sprites[i]
+            th, tw = g.shape
+            x1, y1 = max(0, 2 * x - margin), max(0, 2 * y - margin)
+            x2, y2 = min(roi_m.shape[1], 2 * x + tw + margin), min(roi_m.shape[0], 2 * y + th + margin)
+            if x2 - x1 < tw or y2 - y1 < th:
+                continue
+            sc, lx, ly = self._mm(cv2.matchTemplate(roi_m[y1:y2, x1:x2], g, cv2.TM_CCOEFF_NORMED, mask=m))
+            if sc < self.sprite_threshold:
+                continue
+            bx, by = x1 + lx, y1 + ly
+            mv = None
+            if diff is not None and sc < self.sprite_sure:
+                mv = float(diff[by:by + th, bx:bx + tw].mean())
+            cand = {"score": sc, "loc": (bx, by, tw, th), "template": name, "color_dist": None, "edge_score": None,
+                    "motion": None if mv is None else round(mv, 1), "sprite": True}
+            if mv is None or mv >= self.motion_min:
+                if best is None or sc > best["score"]:
+                    best = dict(cand, verified=True)
+            elif fallback is None or sc > fallback["score"]:
+                fallback = dict(cand, verified=False)
+        return best, fallback

@@ -27,6 +27,7 @@ from worldpos import WorldTracker, pick_landmark  # noqa: E402
 from minimap import MinimapTracker  # noqa: E402
 import harvest_templates as hv  # noqa: E402
 import dedupe_templates as dd  # noqa: E402
+import wz_sprites  # noqa: E402
 
 def open_file(path):
     """跨平台打开文件（图片等）。"""
@@ -453,6 +454,42 @@ def do_monster_delete():
         print("已删除")
 
 
+def do_monster_wz():
+    """从游戏客户端原版精灵图（aa/ 目录的 Unity 包）导入带透明通道的模板到当前怪物集。"""
+    m = current_monster()
+    if not m:
+        return
+    c = cfg()
+    aa = (c.get("wz") or {}).get("aa_dir") or ""
+    print(f"客户端资源目录 aa_dir: {aa or '(未设置，config.yaml 的 wz.aa_dir)'}")
+    print("怪物 ID 是 7 位数字（冒险岛 Mob ID），已知：野猪 2230102、斧木妖(带斧头树桩) 1130100、树桩 0130100、黑斧木妖 1140100、绿蘑菇 1110100、蘑菇 2230101")
+    print("不知道 ID 可以先用命令行看图集：python tools/wz_sprites.py atlas --mob <id> --out /tmp/x")
+    ids = ask("要导入的怪物 ID（多个用逗号分隔）", "")
+    ids = [x.strip() for x in str(ids).replace("，", ",").split(",") if x.strip()]
+    if not ids:
+        return
+    import wz_sprites
+    argv = ["extract", "--out", os.path.abspath(monster_dir(m)), "--dedupe", "0.9"]
+    for x in ids:
+        argv += ["--mob", x]
+    if aa:
+        argv += ["--aa", aa]
+    try:
+        wz_sprites.main(argv)
+    except SystemExit as e:
+        print(e)
+        return
+    except Exception as e:
+        print("导入失败:", e)
+        return
+    n_wz = len(glob.glob(os.path.join(monster_dir(m), "wz_*.png")))
+    n_manual = len(glob.glob(os.path.join(monster_dir(m), "*.png"))) - n_wz
+    print(f"当前集 {m}: 精灵图模板 {n_wz} 张，手抠模板 {n_manual} 张。精灵缩放比 detection.sprite_scale={c['detection'].get('sprite_scale')}"
+          "（换了游戏窗口大小要重标：python tools/wz_sprites.py scale --mob <id> --source <录像>）")
+    if n_manual:
+        print("提示：手抠模板可以移到 _manual/ 子目录停用（省一半耗时；被宠物挡住/技能特效盖住的怪只有手抠+运动门槛能认，需要时再放回来）")
+
+
 def menu_monster():
     while True:
         cur = cfg().get("monster", {}).get("current", "(未设置)")
@@ -460,6 +497,7 @@ def menu_monster():
             ("新建怪物", do_monster_new),
             ("选择怪物", do_monster_select),
             ("手动抠模板（摄像头定格拖框）", do_monster_crop),
+            ("从游戏原版精灵图导入（带透明通道，推荐；需要客户端 aa 目录）", do_monster_wz),
             ("半自动采集（录制 → 扫描 → 挑选）", do_monster_harvest),
             ("重新挑选上次扫描的候选", do_monster_pick_again),
             ("查看 / 删除模板", do_monster_view),

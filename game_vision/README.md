@@ -80,7 +80,7 @@ python menu.py
 | roi.world | enabled / deadband / lock_frames / landmark_thr / fix_every / landmark_box | 地图 x 估计（`worldpos.py`）：屏幕 x + 累加镜头位移(bg_dx)，靠地图边界归零或地标匹配防漂移。端点标定时会自动抠地标 |
 | roi | facing / near_offset / far_offset / up / down / scroll_band | 玩家前方 ROI（up/down 只覆盖同一层，默认 70/20——上 135 会把上层平台的怪框进来、站在下面对着够不着的怪挥刀）。near_offset<0 时两侧矩形重叠会自动合并成一个（不重复匹配，怪在哪侧按位置判断）。**菜单「设置 → 检测范围」可在画面上拖框设置**：定格后在角色面朝一侧拖框，自动换算成相对脚底的前/后/上/下距离（左侧拖也行，运行时左右镜像；near 为负 = 从身后开始）。`facing`: **`key`**(用决策按住的方向键定朝向，只检测前进方向，推荐) / `auto`(按位移估计) / `right` / `left` / `both`。far_offset 现为 140（攻击区，不追怪）。scroll_band 是估计背景滚动量的画面带 |
 | roi.facing_auto | window / min_move | 前进方向判定：累计最近 N 帧的“角色屏幕位移 − 背景滚动位移”，超过 min_move 像素才切换方向 |
-| detection | threshold / sure_score / motion_min / color_verify.max_dist / edge_min / topk / flip | `threshold` 是候选下限（0.5）；`sure_score`(0.65) 以上直接接受，之间的候选还要求**框里在动**（与上一帧按背景滚动对齐后的平均灰度差 ≥ `motion_min`=5）——棕色岩壁纹理能拿 0.5~0.63 并骗过颜色/边缘校验但它不动，走动/被打的怪 15~60；发呆的中分怪会漏（与只用 0.65 时相同）。2026-08-28 录像回归：命中帧 319→576，人工核对新增的全是真怪。候选框颜色直方图距离上限 0.48；边缘图匹配下限 0.4；每模板检查的峰数；flip 自动加水平翻转模板；`idle_skip: 2` 空闲跳帧——去抖窗口内一次都没命中时每 2 帧才跑一次模板匹配（占单帧 70% 的开销减半），一有命中立刻逐帧，首次发现最多晚 1 帧（33 ms）；日志里该帧带 `det_skipped: true` |
+| detection | threshold / sure_score / motion_min / sprite_scale / sprite_threshold / sprite_sure / color_verify… | `threshold` 是候选下限（0.5）；`sure_score`(0.65) 以上直接接受，之间的候选还要求**框里在动**（与上一帧按背景滚动对齐后的平均灰度差 ≥ `motion_min`=5）——棕色岩壁纹理能拿 0.5~0.63 并骗过颜色/边缘校验但它不动，走动/被打的怪 15~60；发呆的中分怪会漏（与只用 0.65 时相同）。2026-08-28 录像回归：命中帧 319→576，人工核对新增的全是真怪。精灵图模板（`wz_*.png`，见「原版精灵图模板」）走 masked 两阶段匹配：`sprite_scale` 0.93、`sprite_threshold` 0.6、`sprite_sure` 0.75，命中帧再到 1106。候选框颜色直方图距离上限 0.48；边缘图匹配下限 0.4；每模板检查的峰数；flip 自动加水平翻转模板；`idle_skip: 2` 空闲跳帧——去抖窗口内一次都没命中时每 2 帧才跑一次模板匹配（占单帧 70% 的开销减半），一有命中立刻逐帧，首次发现最多晚 1 帧（33 ms）；日志里该帧带 `det_skipped: true` |
 | debounce | window_size / enter_min_hits / exit_min_misses | 滞回去抖：5 帧中 ≥3 命中进入，≥4 未命中退出 |
 | control | mode / attack_key / attack_interval_ms / approach / patrol_tolerance / walk_max_ms … | 决策：off 只检测 / dry 只打日志 / pico 真发按键。有怪（在攻击区内）：站着打（approach=false 不追）；没怪：在两个端点间巡逻（端点存 settings `patrol.<怪物名>`）。`p` 暂停 |
 | control | stuck_ms / stuck_move_px / stuck_scroll_px | P9 卡住检测：按着方向键 1.5 s 内玩家 x 没动且背景没滚 → `stuck`（只报警） |
@@ -135,6 +135,23 @@ python tools/harvest_templates.py scan --source 0 --seconds 120 --seeds template
 python tools/harvest_templates.py pick --name stump_map01 --ids 0,3,5-9,12 --out templates/stump_map01
 ```
 框由算法按匹配位置对齐、尺寸统一；挑选时**跳过**闪白/被遮挡/模糊的候选。`--step` 控制抽帧间隔，`--thr` 控制候选宽松度（默认 0.55）。
+
+## 原版精灵图模板（2026-08-28 起推荐）
+
+游戏客户端（Unity 版）的 `aa/` 目录里有全部怪物的精灵图集（`Assets/WzAssets/SpriteSheet/CN/Mob/<id>_0.png`，RGBA，
+带透明通道）。`tools/wz_sprites.py` 直接从 Unity 包里流式取出（Mob 包解压后 8.8 GB，不整包载入），
+按 `.wzspritesheet` 里的帧矩形表切成单帧，存成 `templates/<集>/wz_<id>_<帧>.png`。运行时只比精灵像素（masked 匹配），
+背景是什么都不影响：实测真怪 0.85~0.94、背景 ≤0.6，`harvest_yezhu.mp4` 上命中帧 576→1106，且没有岩壁/宠物/金币误报。
+
+```
+python tools/wz_sprites.py list --grep 2230                    # 列 Mob ID
+python tools/wz_sprites.py atlas --mob 2230102 --out /tmp/x     # 看图集是哪种怪
+python tools/wz_sprites.py extract --mob 2230102 --mob 1130100 --out templates/yezhu   # 菜单「怪物模板 → 从游戏原版精灵图导入」同此
+python tools/wz_sprites.py scale --mob 2230102 --source recordings/harvest_yezhu.mp4    # 标定 detection.sprite_scale（本机 0.93）
+```
+已知 ID：野猪 2230102、斧木妖 1130100、树桩 0130100、黑斧木妖 1140100、绿蘑菇 1110100、蘑菇 2230101。
+限制：被宠物/角色挡住大半的怪、被技能特效盖住的怪，masked 分会掉到 0.6 以下（手抠模板 + 运动门槛反而能认）；
+需要的话把 `_manual/` 里的手抠模板放回目录，两种模板可混用（耗时相加）。检测框高度要 ≥ 最高的精灵帧（斧木妖 93×0.93≈87 px，up 70 + down 20 刚好）。
 
 ## 工具
 - `tools/crop_templates.py --source ../shot.mp4 --out templates/stump_map01`：在矫正后的画面上拖框抠模板（a/d 翻帧，s 保存）。
