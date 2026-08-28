@@ -96,6 +96,10 @@ B 电脑(Windows, 冒险岛) --OBS DistroAV NDI 输出--> 局域网 --NDI(TCP)--
    缩放比 `detection.sprite_scale` **0.93**（偏 0.03 分掉 0.1；`wz_sprites.py scale` 标定）；`sprite_threshold 0.6 / sprite_sure 0.75`，之间要求运动。
    录像：真怪 **0.85–0.94**、背景 ≤0.6，命中帧 576→**1106**，≥0.75 抽样无误报（岩壁/宠物/金币/木墙都不再误报）；漏：被宠物/角色挡住大半、被闪电特效盖住的怪（<0.6，手抠+运动门槛反而能认）。
    `templates/yezhu/` 现为 15 张精灵帧（野猪 12 去重到 6 + 斧木妖 9），手抠 30 张归档 `_manual/`。**真机 pico 模式尚未验证。**
+7. **全怪物模板库 + 按名字搜索添加**（用户 /goal）：`tools/wz_sprites.py extract-all` 把 Mob 包 858 只怪全部导出到 `templates/_wz/<id>/`（动画帧去重≥0.9），
+   生成 `catalog.json`、`names.json`（`json_a2909…` 包里 TextAsset「Mob」= String.wz Mob.img 的 JSON，839/856 有中文名；16 658 帧（去重前 24 253），176 MB，约 10 分钟）和缩略图 `sheet_XX.jpg`（每页 100 只）。
+   菜单「怪物模板」新增「搜索精灵库添加怪物」（按名字/ID 模糊搜、可多选，帧复制进当前集）和「浏览精灵库缩略图」。新图流程 = 新建怪物(地图) → 搜索添加 → 标端点 → 开始检测。
+   `templates/_wz/` 不进 git（可重建）。
 6. 坑：一次编辑把 `wz:` 段插进 `config.yaml` 的 `detection:` 中间，`scales/flip/color_verify/idle_skip` 掉出 detection（跳帧失效、手抠模板无校验）→ 已修；改 config 后用 `app.load_config` 核对键。
 
 ## 一、2026-08-27 做了什么（按时间）
@@ -152,6 +156,7 @@ B 电脑(Windows, 冒险岛) --OBS DistroAV NDI 输出--> 局域网 --NDI(TCP)--
    看识别效果用 ROI 切片按 score/motion 拼 contact sheet 人工核对（每次都靠这个发现问题）。
 
 ## 三、下一步
+0''. 新图直接用「搜索精灵库添加怪物」；怪的动作帧多（>10 张）时可删掉 die/hit 帧省耗时（每张 ≈1 ms/帧）。
 0'. **精灵图模板真机验证**（pico 模式跑 5–10 min：ATTACK 帧 `raw` 比例应 >85%，看有无打岩石/打宠物；不行先把 `sprite_sure` 提到 0.8）；其他地图用菜单「从游戏原版精灵图导入」+ 重标端点即可。
    被宠物挡住的怪：把几张手抠模板放回目录混用，或游戏里隐藏宠物名。masked 匹配再提速可走 FFT 版 masked NCC（现 35 ms/ROI）。
 0. **NDI 切换后的收尾**：(a) B 机把游戏窗口点回前台，再实机开车确认 Pico 按键到达；(b) 角色到 shuren 地图后验证/重抠怪物模板（相机时代的模板在清晰画面上分数未知）；

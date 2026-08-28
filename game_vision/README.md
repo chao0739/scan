@@ -147,8 +147,13 @@ python tools/harvest_templates.py pick --name stump_map01 --ids 0,3,5-9,12 --out
 python tools/wz_sprites.py list --grep 2230                    # 列 Mob ID
 python tools/wz_sprites.py atlas --mob 2230102 --out /tmp/x     # 看图集是哪种怪
 python tools/wz_sprites.py extract --mob 2230102 --mob 1130100 --out templates/yezhu   # 菜单「怪物模板 → 从游戏原版精灵图导入」同此
+python tools/wz_sprites.py extract-all                          # 全部怪 -> templates/_wz 模板库 + 中文名 + 缩略图（菜单搜索用）
 python tools/wz_sprites.py scale --mob 2230102 --source recordings/harvest_yezhu.mp4    # 标定 detection.sprite_scale（本机 0.93）
 ```
+**全怪物模板库（推荐用法）**：`python tools/wz_sprites.py extract-all` 一次把 Mob 包里全部 858 只怪导成 `templates/_wz/<id>/wz_<id>_<帧>.png`
+（动画帧去重），并生成 `catalog.json`、`names.json`（客户端 String 表里的中文名，839 只有名字）和缩略图 `sheet_XX.jpg`（每页 100 只按 ID 排）。
+之后换图流程 = 「怪物模板 → 新建怪物（名字按地图起）」→「**搜索精灵库添加怪物**」输 `野猪`/`2230` 之类关键字、选编号 → 帧复制进当前集 → 标端点 → 开始检测。
+找不到名字的怪用「浏览精灵库缩略图」按图找 ID。库目录不进 git（可重建）。
 已知 ID：野猪 2230102、斧木妖 1130100、树桩 0130100、黑斧木妖 1140100、绿蘑菇 1110100、蘑菇 2230101。
 限制：被宠物/角色挡住大半的怪、被技能特效盖住的怪，masked 分会掉到 0.6 以下（手抠模板 + 运动门槛反而能认）；
 需要的话把 `_manual/` 里的手抠模板放回目录，两种模板可混用（耗时相加）。检测框高度要 ≥ 最高的精灵帧（斧木妖 93×0.93≈87 px，up 70 + down 20 刚好）。

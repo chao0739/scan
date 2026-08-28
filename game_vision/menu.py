@@ -2,6 +2,7 @@
 数字选功能，不需要记命令。用户设置保存在 settings.yaml，下次自动沿用。
 """
 import glob
+import json
 import os
 import shutil
 import subprocess
@@ -490,6 +491,80 @@ def do_monster_wz():
         print("提示：手抠模板可以移到 _manual/ 子目录停用（省一半耗时；被宠物挡住/技能特效盖住的怪只有手抠+运动门槛能认，需要时再放回来）")
 
 
+WZ_LIB = os.path.join(HERE, "templates", "_wz")
+
+
+def wz_catalog():
+    """精灵库目录 templates/_wz/（tools/wz_sprites.py extract-all 生成）：{id: {frames, sizes, name}}；没有则 None。"""
+    p = os.path.join(WZ_LIB, "catalog.json")
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        cat = json.load(f)
+    np_ = os.path.join(WZ_LIB, "names.json")
+    if os.path.exists(np_):
+        with open(np_, encoding="utf-8") as f:
+            names = json.load(f)
+        for k, v in cat.items():
+            if not v.get("name"):
+                v["name"] = names.get(k, "")
+    return cat
+
+
+def do_monster_search_add():
+    """搜索精灵库（名字/ID）把怪加进当前模板集。"""
+    m = current_monster()
+    if not m:
+        return
+    cat = wz_catalog()
+    if cat is None:
+        print(f"还没有精灵库 {WZ_LIB}（运行 python tools/wz_sprites.py extract-all 生成，约 1 分钟，需要客户端 aa 目录）")
+        return
+    while True:
+        q = ask("搜索怪物（名字或 ID 的一部分，如 野猪 / 2230；留空返回）", "")
+        if not q:
+            return
+        q = str(q).strip()
+        hits = [(k, v) for k, v in sorted(cat.items()) if v.get("frames") and (q in k or q in (v.get("name") or ""))]
+        if not hits:
+            print("没找到；可以打开缩略图找 ID：templates/_wz/sheet_XX.jpg（按 ID 排序，每页 100 只）")
+            continue
+        items = [(f"{k}  {v.get('name') or '(无名字)'}  {v['frames']} 帧 {v['sizes'][0][0]}x{v['sizes'][0][1]}", k) for k, v in hits[:30]]
+        if len(hits) > 30:
+            print(f"匹配 {len(hits)} 只，只列前 30，请输入更具体的关键字")
+        print("可一次选多个：输入编号用逗号分隔（如 1,3）")
+        print(f"\n=== 搜索「{q}」 ===")
+        for i, (label, _) in enumerate(items, 1):
+            print(f"  {i}. {label}")
+        sel = ask("选择编号（多个用逗号；留空重搜）", "")
+        if not sel:
+            continue
+        chosen = []
+        for tok in str(sel).replace("，", ",").split(","):
+            tok = tok.strip()
+            if tok.isdigit() and 1 <= int(tok) <= len(items):
+                chosen.append(items[int(tok) - 1][1])
+        for mob in chosen:
+            src = glob.glob(os.path.join(WZ_LIB, mob, "wz_*.png"))
+            for f in src:
+                shutil.copy2(f, monster_dir(m))
+            print(f"已加入 {mob} {cat[mob].get('name', '')}：{len(src)} 帧 -> {monster_dir(m)}")
+        n_wz = len(glob.glob(os.path.join(monster_dir(m), "wz_*.png")))
+        print(f"当前集 {m} 共 {n_wz} 张精灵图模板（每张 ≈1 ms/帧；超过 ~30 张会掉帧，可用「查看模板」核对后删掉多余动作帧）")
+        if ask("继续搜索添加？(y/n)", "n").lower() != "y":
+            return
+
+
+def do_monster_browse_lib():
+    """打开精灵库缩略图（每页 100 只，按 ID 排）。"""
+    pages = sorted(glob.glob(os.path.join(WZ_LIB, "sheet_*.jpg")))
+    if not pages:
+        print("还没有精灵库缩略图（python tools/wz_sprites.py extract-all）")
+        return
+    print(f"共 {len(pages)} 页；正在打开第 1 页，其余在 {WZ_LIB}/sheet_XX.jpg")
+    open_file(pages[0])
+
+
 def menu_monster():
     while True:
         cur = cfg().get("monster", {}).get("current", "(未设置)")
@@ -497,7 +572,9 @@ def menu_monster():
             ("新建怪物", do_monster_new),
             ("选择怪物", do_monster_select),
             ("手动抠模板（摄像头定格拖框）", do_monster_crop),
-            ("从游戏原版精灵图导入（带透明通道，推荐；需要客户端 aa 目录）", do_monster_wz),
+            ("搜索精灵库添加怪物（按名字/ID，推荐）", do_monster_search_add),
+            ("浏览精灵库缩略图（找不到名字时按图找 ID）", do_monster_browse_lib),
+            ("从游戏原版精灵图导入（带透明通道，按 ID 直接从客户端包导；需要客户端 aa 目录）", do_monster_wz),
             ("半自动采集（录制 → 扫描 → 挑选）", do_monster_harvest),
             ("重新挑选上次扫描的候选", do_monster_pick_again),
             ("查看 / 删除模板", do_monster_view),

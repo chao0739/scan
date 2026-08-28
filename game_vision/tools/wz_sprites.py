@@ -14,6 +14,7 @@
   python tools/wz_sprites.py atlas --mob 2230102 [--mob 1130100] --out /tmp/x   # 导出整张图集（看是哪种怪）
   python tools/wz_sprites.py extract --mob 2230102 --mob 1130100 --out templates/yezhu [--dedupe 0.9]
       -> templates/yezhu/wz_2230102_00.png ...（RGBA，原始尺寸；运行时按 detection.sprite_scale 缩放）
+  python tools/wz_sprites.py extract-all [--out templates/_wz]     # 全部怪 -> 模板库 + catalog.json + names.json(中文名) + 缩略图 sheet_XX.jpg；菜单「搜索精灵库添加怪物」用
   python tools/wz_sprites.py scale --mob 2230102 --source recordings/harvest_yezhu.mp4 [--calib ...]
       -> 扫描 0.85~1.05 找精灵在矫正后画面里的缩放比（本机 1854x1042 窗口 -> 1280x720 实测 0.93）
 需要：pip install UnityPy lz4
@@ -242,9 +243,94 @@ def dedupe(frames, thr):
     return [frames[i] for i in keep]
 
 
+def find_mob_names(aa_dir, max_mb=200):
+    """怪物中文名：json_*.bundle 里名为 "Mob" 的 TextAsset（String.wz/Mob.img 的 JSON：{id: {"name": ...}}）。返回 {id: name}。"""
+    import json
+    import UnityPy
+    for p in sorted(glob.glob(os.path.join(aa_dir, "w", "json_*.bundle")), key=os.path.getsize):
+        try:
+            br = BundleReader(p)
+        except Exception:
+            continue
+        if br.u_off[-1] > max_mb * 2 ** 20:
+            continue
+        env = UnityPy.load(p)
+        for ob in env.objects:
+            if ob.type.name != "TextAsset":
+                continue
+            d = ob.read()
+            if d.m_Name != "Mob":
+                continue
+            txt = d.m_Script if isinstance(d.m_Script, str) else bytes(d.m_Script).decode("utf-8", "ignore")
+            try:
+                j = json.loads(txt)
+            except Exception:
+                continue
+            names = {k: v.get("name", "") for k, v in j.items() if isinstance(v, dict) and v.get("name")}
+            if names:
+                print(f"[wz] 怪物名表: {os.path.basename(p)[:30]} TextAsset Mob，{len(names)} 条")
+                return names
+    print("[wz] 没找到怪物名表（TextAsset Mob），只能按 ID 搜")
+    return {}
+
+
+def extract_all(ms, out, dedupe_thr, names_json=None):
+    """把 Mob 包里所有怪导成模板库：<out>/<id>/wz_<id>_<k>.png + catalog.json + 缩略图拼图 sheet_XX.jpg（每页 100 只，按 ID 排）。
+    菜单「怪物模板 → 搜索精灵库添加怪物」按 catalog 搜 ID/名字，把帧复制进当前模板集。"""
+    import json
+    import time
+    os.makedirs(out, exist_ok=True)
+    names = {}
+    if names_json and os.path.exists(names_json):
+        names = json.load(open(names_json, encoding="utf-8"))
+    else:
+        names = find_mob_names(os.path.dirname(os.path.dirname(ms.path)))
+    if names:
+        json.dump({i: names.get(i, "") for i in ms.ids if names.get(i)}, open(os.path.join(out, "names.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=0)
+    cat, thumbs, t0 = {}, [], time.time()
+    for i, mob in enumerate(ms.ids):
+        d = os.path.join(out, mob)
+        try:
+            fr = ms.frames(mob)
+        except Exception as e:
+            cat[mob] = {"frames": 0, "error": str(e)[:80]}
+            continue
+        n0 = len(fr)
+        if dedupe_thr and n0 > 1:
+            fr = dedupe(fr, dedupe_thr)
+        if fr:
+            os.makedirs(d, exist_ok=True)
+            for old in glob.glob(os.path.join(d, "wz_*.png")):
+                os.remove(old)
+            for k, (img, rect) in enumerate(fr):
+                cv2.imwrite(os.path.join(d, f"wz_{mob}_{k:02d}.png"), img)
+        cat[mob] = {"frames": len(fr), "raw_frames": n0, "sizes": [[int(r[2]), int(r[3])] for _, r in fr], "name": names.get(mob, "")}
+        if fr:
+            img = fr[0][0]
+            a = img[..., 3:4] / 255.0
+            rgb = (img[..., :3] * a + 110 * (1 - a)).astype(np.uint8)
+            sc = min(88 / rgb.shape[1], 76 / rgb.shape[0], 1.0)
+            rgb = cv2.resize(rgb, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
+            c = np.full((100, 96, 3), 110, np.uint8)
+            c[2:2 + rgb.shape[0], 4:4 + rgb.shape[1]] = rgb
+            cv2.putText(c, mob, (2, 96), 0, 0.36, (0, 255, 255), 1)
+            thumbs.append(c)
+        if (i + 1) % 100 == 0:
+            print(f"  {i + 1}/{len(ms.ids)} ({time.time() - t0:.0f}s)")
+    json.dump(cat, open(os.path.join(out, "catalog.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=0)
+    per = 100
+    for k in range(0, len(thumbs), per):
+        page = thumbs[k:k + per] + [np.full((100, 96, 3), 110, np.uint8)] * (per - len(thumbs[k:k + per]))
+        rows = [np.hstack(page[j:j + 10]) for j in range(0, per, 10)]
+        cv2.imwrite(os.path.join(out, f"sheet_{k // per + 1:02d}.jpg"), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 88])
+    ok = sum(1 for v in cat.values() if v["frames"])
+    print(f"[wz] 模板库 {out}: {ok}/{len(cat)} 只怪有帧，共 {sum(v['frames'] for v in cat.values())} 张；缩略图 {len(range(0, len(thumbs), per))} 页 sheet_XX.jpg；catalog.json {'含名字' if names else '无名字（按 ID 搜）'}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["list", "atlas", "extract", "scale"])
+    ap.add_argument("cmd", choices=["list", "atlas", "extract", "extract-all", "scale"])
+    ap.add_argument("--names", default=None, help="extract-all: 怪物名表 json（{id: 名字}），有则写进 catalog 供菜单按名字搜")
     ap.add_argument("--aa", default=None, help="客户端 aa 目录（默认 config.yaml 的 wz.aa_dir）")
     ap.add_argument("--mob", action="append", default=[], help="怪物 ID（可多次），如 2230102=野猪 1130100=斧木妖")
     ap.add_argument("--grep", default=None, help="list 时只列含此子串的 ID")
@@ -262,6 +348,9 @@ def main(argv=None):
     if args.cmd == "list":
         ids = [i for i in ms.ids if not args.grep or args.grep in i]
         print(" ".join(ids))
+        return
+    if args.cmd == "extract-all":
+        extract_all(ms, args.out or os.path.join(ROOT, "templates", "_wz"), args.dedupe, args.names)
         return
     if not args.mob:
         sys.exit("需要 --mob <id>")
