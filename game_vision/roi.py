@@ -18,6 +18,46 @@ def clamp_rect(x1, y1, x2, y2, w, h):
     return (x1, y1, x2, y2)
 
 
+def tighten_nameplate(img, margin=2, white=170):
+    """把用户框的名牌区域自动收紧到「名字文字」四周（文字外扩 margin 像素）。返回 (x0, y0, x1, y1)，相对 img。
+
+    为什么：名牌条是半透明的，条里除了白字都是透过来的背景，框得越宽背景占比越大、换个地方分数越低
+    （实测整条 40×16 在暗背景 0.76，收紧到 32×12 后 0.80~0.93）；连勋章一起框（100×33）更是只有 0.57。
+    做法：白色(>white)连通块里挑「字符块」——高 4~14、宽 1~14，且块的上方/下方 3px 内多数是深色(<dark)（名字写在深色条上；
+    勋章牌是蓝色、沙地/白宠物周围是亮色，都不算）。字符块按行分组（同一行且相邻间隔≤6px），≥3 个字符、总宽 12~90 的行才算名字行
+    （贴着的宠物名牌隔着 ≥7px，是另一行；勋章不满足深色底），多行取最靠上的（勋章在名字下面）。找不到就原样返回。"""
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    h, w = g.shape[:2]
+    dark = 90
+    n, _lab, st, _cen = cv2.connectedComponentsWithStats((g > white).astype(np.uint8), 8)
+    glyphs = []
+    for i in range(1, n):
+        x, y, gw, gh, area = (int(v) for v in st[i])
+        if not (4 <= gh <= 14 and 1 <= gw <= 14 and area >= 4):
+            continue
+        nb = np.concatenate([g[max(0, y - 3):y, x:x + gw].ravel(), g[y + gh:y + gh + 3, x:x + gw].ravel()])
+        if nb.size == 0 or (nb < dark).mean() < 0.5:
+            continue
+        glyphs.append((x, y, x + gw, y + gh))
+    if not glyphs:
+        return 0, 0, w, h
+    glyphs.sort()
+    lines = []                                  # 每行: [x0, y0, x1, y1, count]
+    for x0, y0, x1, y1 in glyphs:
+        cy = (y0 + y1) / 2
+        for L in lines:
+            if abs((L[1] + L[3]) / 2 - cy) <= 4 and x0 - L[2] <= 6:
+                L[0], L[1], L[2], L[3], L[4] = min(L[0], x0), min(L[1], y0), max(L[2], x1), max(L[3], y1), L[4] + 1
+                break
+        else:
+            lines.append([x0, y0, x1, y1, 1])
+    cands = [L for L in lines if L[4] >= 3 and 12 <= L[2] - L[0] <= 90 and 5 <= L[3] - L[1] <= 16]
+    if not cands:
+        return 0, 0, w, h
+    x0, y0, x1, y1, _ = min(cands, key=lambda L: L[1])
+    return max(0, x0 - margin), max(0, y0 - margin), min(w, x1 + margin), min(h, y1 + margin)
+
+
 class ROIProvider:
     def __init__(self, cfg, frame_w, frame_h):
         self.cfg = cfg

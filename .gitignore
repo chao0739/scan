@@ -6,6 +6,7 @@ game_vision/logs/
 game_vision/recordings/
 game_vision/harvest/
 game_vision/__pycache__/
+game_vision/.ndi/
 **/__pycache__/
 # 本机用户设置（含个人选择，不共享）
 game_vision/settings.yaml

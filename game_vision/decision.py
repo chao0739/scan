@@ -13,6 +13,9 @@ P9 卡住检测（只报警，不动作）：按着方向键 stuck_ms 内玩家�
   -> self.stuck=True（日志 stuck 字段 / 画面 STUCK）。镜头跟随时人不动但背景在滚，不算卡住；没按方向键不算卡住。
 P10 跳跃恢复（jump_on_stuck=true 时）：巡逻中卡住 -> 方向键继续按着 + 点一下 jump_key -> jump_recover_ms 内不再判定；
   仍卡住则重试，连续 jump_max_retry 次无效 -> 放弃：掉头朝另一端走（重试计数在人动起来后清零）。
+拟人随机（human_*，2026-08-28）：巡逻中按泊松间隔随机跳一下（human_jump_per_min，最短间隔 human_jump_min_gap_ms）；
+  每次到端点掉头时，下一个端点随机多走/少走 ±human_endpoint_px，并随机停顿 0~human_pause_ms 再走；
+  时间巡逻的 walk_max_ms 也按 ±human_walk_jitter 抖动。攻击/卡住恢复期间不随机跳。
 安全：
   暂停(p) / 玩家丢失 lost_release_frames 帧 -> 松开全部按键
   每 sync_interval_ms 重发一次期望的按键状态（UDP 丢包导致的卡键最多持续这么久）
@@ -87,6 +90,8 @@ DEFAULTS = dict(attack_key="ctrl", attack_press_ms=60, attack_interval_ms=700, a
                 stuck_ms=1500, stuck_move_px=3, stuck_scroll_px=1.5,
                 jump_on_stuck=False, jump_key="alt", jump_press_ms=80, jump_recover_ms=900, jump_max_retry=3,
                 jump_clear_px=40, giveup_walk_ms=4000,
+                human_jump_per_min=4, human_jump_min_gap_ms=2500, human_endpoint_px=60, human_pause_ms=800,
+                human_walk_jitter=0.2,
                 lost_release_frames=10, sync_interval_ms=1000, start_dir="right")
 
 
@@ -114,6 +119,12 @@ class Decision:
         self._stuck_x = None              # 这一串卡住开始时的 x；离开它 jump_clear_px 以上才算脱困
         self._stuck_scroll = 0.0          # 卡住以来累计的背景滚动（镜头跟随时人不动但在走）
         self._no_flip_until = 0.0         # 放弃掉头后这段时间内端点逻辑不许再翻转（否则卡在端点外侧时会 0 秒来回翻）
+        # 拟人随机
+        self._next_rand_jump = None       # 下次随机跳的时间（None=还没排）
+        self.rand_jump_count = 0
+        self._end_offset = 0.0            # 本趟端点偏移：>0 多走，<0 少走（每次掉头重抽）
+        self._pause_until = 0.0           # 端点停顿截止
+        self._walk_limit_ms = c["walk_max_ms"]
         self.last_attack = 0.0
         self.last_seen = None            # (time, side) 最近一次看到怪
         self.lost_frames = 0
@@ -159,9 +170,25 @@ class Decision:
         l, r = float(min(l, r)), float(max(l, r))
         return l, r, self.c["patrol_tolerance"]
 
+    def _human_turn(self, now, span=None):
+        """掉头时的拟人随机：重抽下一个端点的偏移（±human_endpoint_px，少走不能少过两端点中点）、时间巡逻步长抖动、
+        端点停顿 0~human_pause_ms（停顿期间松开方向键）。"""
+        c = self.c
+        e = float(c["human_endpoint_px"] or 0)
+        self._end_offset = random.uniform(-e, e) if e > 0 else 0.0
+        if span is not None:
+            self._end_offset = max(self._end_offset, -(span / 2 - c["patrol_tolerance"] - 1))
+        j = float(c["human_walk_jitter"] or 0)
+        self._walk_limit_ms = c["walk_max_ms"] * random.uniform(1 - j, 1 + j)
+        p = float(c["human_pause_ms"] or 0)
+        self._pause_until = now + random.uniform(0, p) / 1000 if p > 0 else 0.0
+
     def _patrol(self, now, player_x):
         """P7 位置巡逻：朝当前目标端点走，进到端点 tolerance 内就换另一端。
         端点未标定（或这一帧不知道 player_x）时退回原来的「走 walk_max_ms 后掉头」。"""
+        if now < self._pause_until:                          # 端点随机停顿：站一会儿再走
+            self._release_dir()
+            return
         l, r, tol = self.patrol_bounds()
         if l is None or player_x is None:
             self.patrol_target = None
@@ -169,18 +196,25 @@ class Decision:
                 self._hold(self.facing or self.c["start_dir"], now)
             elif l is not None and self.c["patrol_seek"]:
                 pass    # 端点已标但当前位置未知（地图坐标还没校准）：一直走，直到找到地标；卡住由 P10 掉头
-            elif (now - self.walk_start) * 1000 >= self.c["walk_max_ms"]:
+            elif (now - self.walk_start) * 1000 >= self._walk_limit_ms:
+                self._human_turn(now)
                 self._hold("left" if self.held == "right" else "right", now)
             return
         if self.patrol_target is None:                      # 第一帧：朝更远的那一端走
             self.patrol_target = "left" if abs(player_x - l) > abs(player_x - r) else "right"
-        # 只在「到达目标端」时翻转，所以坐标抖动不会来回换向（另一端还远着）
+        # 只在「到达目标端」时翻转，所以坐标抖动不会来回换向（另一端还远着）。
+        # 端点加上本趟随机偏移：多走一些(>0)或少走一些(<0)，每次掉头重抽
         if now < self._no_flip_until:
             pass                                             # 刚放弃掉头：先走开一段再让端点逻辑说话
-        elif self.patrol_target == "right" and player_x >= r - tol:
+        elif self.patrol_target == "right" and player_x >= r + self._end_offset - tol:
             self.patrol_target = "left"
-        elif self.patrol_target == "left" and player_x <= l + tol:
+            self._human_turn(now, r - l)
+        elif self.patrol_target == "left" and player_x <= l - self._end_offset + tol:
             self.patrol_target = "right"
+            self._human_turn(now, r - l)
+        if now < self._pause_until:
+            self._release_dir()
+            return
         self._hold(self.patrol_target, now)
 
     def _update_stuck(self, now, player_x, bg_dx):
@@ -203,6 +237,10 @@ class Decision:
         self.stuck = (now - self._still_since) * 1000 >= c["stuck_ms"]
         if self.stuck and not was:
             self.stuck_count += 1
+
+    def _schedule_rand_jump(self, now, per_min):
+        gap = random.expovariate(per_min / 60.0)
+        self._next_rand_jump = now + max(gap, self.c["human_jump_min_gap_ms"] / 1000)
 
     def set_paused(self, paused):
         self.paused = paused
@@ -283,6 +321,20 @@ class Decision:
                     self._hold("left" if self.held == "right" else "right", now)
                 self._still_since = now
                 self.state = "GIVEUP"
+
+        # 拟人：巡逻走着的时候按泊松间隔随机跳一下（攻击、卡住恢复、端点停顿期间不跳）
+        if self.state == "PATROL" and self.held is not None and not self.stuck and now >= self._recover_until:
+            rate = float(c["human_jump_per_min"] or 0)
+            if rate <= 0:
+                pass
+            elif self._next_rand_jump is None:
+                self._schedule_rand_jump(now, rate)
+            elif now >= self._next_rand_jump:
+                self.act.key_press(c["jump_key"], c["jump_press_ms"])
+                self.rand_jump_count += 1
+                self._schedule_rand_jump(now, rate)
+                self._recover_until = now + c["jump_recover_ms"] / 1000   # 跳跃落地前不判卡住、不再跳
+                self._still_since = now
 
         # 定期同步按键状态：防止 UDP 丢包造成的卡键/漏按
         if (now - self.last_sync) * 1000 >= c["sync_interval_ms"]:

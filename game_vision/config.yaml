@@ -1,9 +1,21 @@
 # 外置摄像头游戏目标检测 MVP 配置
 camera:
-  source: 0            # 摄像头编号，或视频文件路径（命令行 --source 可覆盖）
-  width: 1920
+  source: 0            # 摄像头编号 / 名称关键字 / 视频文件路径 / "ndi:<源名关键字>"（命令行 --source 可覆盖）
+                       # NDI 架构：B 机游戏 → B OBS(NDI 输出) → 局域网 → 本机脚本直接收（不经本机 OBS）。
+                       # 如 "ndi:Game-PC"；菜单「设置→摄像头」会列出局域网上的 NDI 源。整幅画面即游戏，标定用「自动」。
+  width: 1920          # 摄像头采集分辨率（NDI 源由发送端决定，此处忽略）
   height: 1080
   loop_video: false    # 视频文件播放到结尾是否循环
+  ndi_transport: tcp   # NDI 传输：tcp（实测唯一能出图的）/ auto（libndi 默认，优先 RUDP，本网上收不到帧）
+
+minimap:               # 左上角小地图黄点 = 玩家绝对地图位置（minimap.py）。巡逻端点 mode=minimap 时用它，不受镜头跟随/宠物遮挡影响
+  enabled: true
+  region: [0, 0, 400, 260]   # 小地图窗口大致范围（矫正后画面坐标，要把整个窗口含右/下边框框进来）；缩略图区域在其中按边框颜色自动找
+  px_scale: 10               # 1 个小地图像素 ≈ 多少画面像素（勇士部落东入口实测 10.3）；只用来让 patrol_tolerance 含义不变
+  yellow_lo: [20, 120, 180]  # 黄点 HSV 下限
+  yellow_hi: [38, 255, 255]
+  min_area: 10               # 黄点面积范围（720p 下实测 15~45；地图上零星黄色 ≤6）
+  max_area: 90
 
 screen:
   calibration_file: calibration/homography.json
@@ -109,6 +121,12 @@ control:                 # P5/P6：检测结果 -> 按键（decision.py）
   jump_max_retry: 3
   jump_clear_px: 40      # 跳后离开卡住点这么远（位移+镜头滚动）才算脱困；顶墙弹回只有十几像素不算
   giveup_walk_ms: 4000   # 放弃掉头后，这段时间内端点逻辑不翻转（卡在端点外侧时否则会立刻翻回来）
+  # 拟人随机（2026-08-28）：0 = 关
+  human_jump_per_min: 4      # 巡逻中平均每分钟随机跳几次（泊松间隔）
+  human_jump_min_gap_ms: 2500  # 两次随机跳最短间隔
+  human_endpoint_px: 60      # 每次掉头时下一个端点随机多走/少走 ±这么多（屏幕 px；小地图模式下 ×10 后的单位，60≈6 个小地图像素）
+  human_pause_ms: 800        # 到端点后随机停 0~这么久再走
+  human_walk_jitter: 0.2     # 时间巡逻的 walk_max_ms 抖动 ±20%
   lost_release_frames: 10  # 玩家定位连续丢失多少帧后松开全部按键
   sync_interval_ms: 1000 # 定期重发期望按键状态（抗 UDP 丢包）
   start_dir: right

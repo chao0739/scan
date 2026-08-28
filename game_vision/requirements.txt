@@ -1,3 +1,4 @@
 opencv-python>=4.8,<5   # 不要装 opencv-python-headless（无 imshow）；5.x 未验证
 numpy
 pyyaml
+cyndilib>=0.1.1         # 仅 NDI 源（camera.source: "ndi:..."）需要；自带 libndi，无需装 NDI SDK

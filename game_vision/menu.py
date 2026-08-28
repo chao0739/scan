@@ -20,10 +20,11 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 import app  # noqa: E402
-from camera import FrameSource, open_writer, list_cameras  # noqa: E402
-from calibration import Rectifier, load_corners, run_calibration_ui  # noqa: E402
-from roi import ROIProvider  # noqa: E402
+from camera import FrameSource, open_writer, list_cameras, list_ndi_sources, is_ndi_source  # noqa: E402
+from calibration import Rectifier, auto_corners, load_corners, run_calibration_ui, save_corners  # noqa: E402
+from roi import ROIProvider, tighten_nameplate  # noqa: E402
 from worldpos import WorldTracker, pick_landmark  # noqa: E402
+from minimap import MinimapTracker  # noqa: E402
 import harvest_templates as hv  # noqa: E402
 import dedupe_templates as dd  # noqa: E402
 
@@ -92,7 +93,8 @@ def choose(title, items, allow_back=True, back_label="返回"):
 def open_source():
     c = cfg()
     src = str(c["camera"]["source"])
-    return FrameSource(src, c["camera"]["width"], c["camera"]["height"])
+    return FrameSource(src, c["camera"]["width"], c["camera"]["height"],
+                       ndi_transport=c["camera"].get("ndi_transport", "tcp"))
 
 
 def rectifier():
@@ -195,6 +197,24 @@ def do_calibrate():
     except Exception as e:
         print("打开摄像头失败:", e)
         return
+    ndi = is_ndi_source(str(c["camera"]["source"]))
+    how = choose("标定方式", [
+        ("自动：整幅画面就是游戏画面（NDI / 采集卡 / OBS 虚拟摄像头），取非黑区域当四角" + ("（当前是 NDI，推荐）" if ndi else ""), "auto"),
+        ("手动：摄像头拍显示器，点游戏画面四角", "manual"),
+    ])
+    if how is None:
+        src.release()
+        return
+    if how == "auto":
+        ok, frame = src.read()
+        src.release()
+        if not ok:
+            print("读不到画面")
+            return
+        corners, size = auto_corners(frame)
+        save_corners(sc["calibration_file"], corners, size)
+        print(f"自动标定完成：画面 {size[0]}x{size[1]}，游戏区域四角 {corners.astype(int).tolist()}，已保存")
+        return
     existing = load_corners(sc["calibration_file"])
     if existing is not None:
         print("已载入上次的四角作为起点：满意直接按 s 保存；不满意按 r 清空后重新点")
@@ -212,25 +232,31 @@ def do_player_add():
     pid = ask("输入玩家 ID（游戏里显示的名字，仅用于命名档案）")
     if not pid:
         return
-    print("接下来在摄像头画面里：等玩家名牌清晰可见时按 空格 定格，拖框，按 s 保存")
-    print("【框选要点】只框名牌本身（黑底白字的名字条，有公会牌则一起框），四边贴紧，"
-          "不要把角色的脚、树叶、地面等背景框进去——框里背景越多，运行时越容易跟丢或跟到别的东西")
-    res = live_freeze_and_drag("set player", f"player={pid}: drag TIGHTLY around the NAMEPLATE only")
+    print("接下来在画面里：等玩家名牌清晰可见时按 空格 定格，拖框，按 s 保存")
+    print("【框选要点】框住角色脚下的名字条即可（大一点没关系，程序会自动收紧到名字文字四周；勋章不要）。"
+          "名牌是半透明的，框里背景越多、换个地方分数越低，所以最终模板只保留名字文字±2px")
+    res = live_freeze_and_drag("set player", f"player={pid}: drag around the NAMEPLATE (auto-tightened to the name text)")
     if res is None:
         print("已取消")
         return
     frame, (x0, y0, x1, y1) = res
+    crop = frame[y0:y1, x0:x1]
+    tx0, ty0, tx1, ty1 = tighten_nameplate(crop)
+    tight = crop[ty0:ty1, tx0:tx1]
     os.makedirs(PLAYER_DIR, exist_ok=True)
     path = os.path.join(PLAYER_DIR, f"{pid}.png")
-    cv2.imwrite(path, frame[y0:y1, x0:x1])
-    # 名牌左上角 -> 角色脚底中心：名牌紧贴脚下，脚底 ≈ 名牌上沿中点
+    cv2.imwrite(path, tight)
+    tw, th = tight.shape[1], tight.shape[0]
+    # 模板左上角 -> 角色脚底中心：名字文字紧贴脚下（脚底 ≈ 文字上沿再往上几像素），水平取中
     set_setting("roi.player.template", path.replace("\\", "/"))
-    set_setting("roi.player.anchor_dx", (x1 - x0) // 2)
-    set_setting("roi.player.anchor_dy", 4)
+    set_setting("roi.player.anchor_dx", tw // 2)
+    set_setting("roi.player.anchor_dy", 2)
     set_setting("player.current", pid)
-    print(f"已保存玩家 {pid} 的名牌 ({x1 - x0}x{y1 - y0}) -> {path}，并设为当前玩家")
-    if (x1 - x0) * (y1 - y0) > 60 * 40:
-        print("  提示：框比较大（名牌通常约 50x20 px）。如果框进了背景/角色，运行时定位会不稳，建议重做并收紧")
+    print(f"已保存玩家 {pid} 的名牌 -> {path}：你框的 {x1 - x0}x{y1 - y0}，自动收紧到名字文字 {tw}x{th}，并设为当前玩家")
+    if (tx0, ty0, tx1, ty1) == (0, 0, crop.shape[1], crop.shape[0]):
+        print("  [!] 框里没找到像名字那样的一行白字（可能框错位置或名牌被挡），这次按原框保存了，建议重做")
+    elif tw * th > 60 * 20:
+        print("  提示：收紧后仍比较大（名字通常约 30x12 px），如果运行时 player_score 低于 0.8，重做一次")
 
 
 def do_player_select():
@@ -244,7 +270,7 @@ def do_player_select():
         w = cv2.imread(path).shape[1]
         set_setting("roi.player.template", path.replace("\\", "/"))
         set_setting("roi.player.anchor_dx", w // 2)
-        set_setting("roi.player.anchor_dy", 4)
+        set_setting("roi.player.anchor_dy", 2)
         set_setting("player.current", pid)
         print(f"当前玩家 -> {pid}")
 
@@ -453,14 +479,23 @@ def menu_settings():
             (f"控制模式    当前: {c.get('control', {}).get('mode', 'off')}  (off=只检测 / dry=只打日志 / pico=真按键)", "ctl"),
             (f"攻击键/拾取键/间隔 当前: {c.get('control', {}).get('attack_key')} / {c.get('control', {}).get('pickup_key')} / {c.get('control', {}).get('attack_interval_ms')} ms", "atk"),
             (f"卡住后跳跃恢复 当前: {'开' if c.get('control', {}).get('jump_on_stuck') else '关'}  (卡住 1.5s -> 按着方向键跳; 连跳 3 次无效 -> 掉头)", "jump"),
+            (f"拟人随机动作 当前: 随机跳 {c.get('control', {}).get('human_jump_per_min')}/min, 端点偏移 ±{c.get('control', {}).get('human_endpoint_px')}px, "
+             f"端点停顿 0~{c.get('control', {}).get('human_pause_ms')}ms  (0=关)", "human"),
         ])
         if act is None:
             return
         if act == "cam":
             cams = list_cameras()
             print("检测到的摄像头：" + (", ".join(f"{i}={n}" for i, n in cams) if cams else "无"))
-            v = ask("摄像头编号，或名称关键字（如 Insta360，编号变了也能找到）", c["camera"]["source"])
+            try:
+                ndis = list_ndi_sources(timeout=3.0, transport=c["camera"].get("ndi_transport", "tcp"))
+                print("局域网 NDI 源：" + (", ".join(f"ndi:{n}" for n in ndis) if ndis else "无（B 机 OBS 要开 NDI 输出）"))
+            except Exception as e:
+                print(f"NDI 不可用（{e}）")
+            v = ask("摄像头编号 / 名称关键字（如 Insta360）/ NDI 写 ndi:源名关键字（如 ndi:Game-PC）", c["camera"]["source"])
             set_setting("camera.source", int(v) if str(v).isdigit() else v)
+            if is_ndi_source(str(v)):
+                print("提示：NDI 换源后请执行「标定屏幕四角 → 自动」，模板也可能需要在新画面上重抠")
         elif act == "facing":
             v = choose("朝向模式", [("key（用决策按住的方向键，只检测前进方向，推荐）", "key"), ("auto（按位移估计前进方向）", "auto"),
                                  ("right", "right"), ("left", "left"), ("both（两侧，耗时翻倍）", "both")])
@@ -486,6 +521,14 @@ def menu_settings():
                 set_setting("control.jump_on_stuck", v)
                 k = ask("跳跃键（Pico 键名）", c.get("control", {}).get("jump_key", "alt"))
                 set_setting("control.jump_key", str(k))
+        elif act == "human":
+            cc = c.get("control", {})
+            v = ask("巡逻中平均每分钟随机跳几次（0=不跳）", cc.get("human_jump_per_min", 4))
+            set_setting("control.human_jump_per_min", float(v))
+            v = ask("每次掉头时端点随机多走/少走的最大像素（0=关；小地图模式下 60≈6 个小地图像素）", cc.get("human_endpoint_px", 60))
+            set_setting("control.human_endpoint_px", float(v))
+            v = ask("到端点后随机停顿的最长毫秒（0=关）", cc.get("human_pause_ms", 800))
+            set_setting("control.human_pause_ms", float(v))
         elif act == "roi":
             a = ask("近端(px)", c["roi"]["near_offset"])
             b = ask("远端(px)", c["roi"]["far_offset"])
@@ -524,6 +567,7 @@ def do_patrol_bounds():
         return
     out_w, out_h = c["screen"]["output_width"], c["screen"]["output_height"]
     rp = ROIProvider(c["roi"], out_w, out_h)
+    mmt = MinimapTracker(c.get("minimap") or {}, out_w, out_h) if (c.get("minimap") or {}).get("enabled", True) else None
     b = dict(patrol_bounds_of(m))
     b.pop("landmarks", None)
     wcfg = c["roi"].get("world") or {}
@@ -536,6 +580,7 @@ def do_patrol_bounds():
     print("  用你自己的键盘把角色走到你想让它**向右掉头**的位置，按 r 记录；走到**向左掉头**的位置，按 l 记录；按 s 保存")
     print("  窗口顶部 CAM 状态：LOCKED=镜头被地图边界顶住，这里的屏幕 x 可靠，可以记；")
     print("                    FOLLOWING=镜头正跟着人走，屏幕 x 不代表地图位置，这里记的点无效（先来回走两步让它判断）")
+    print("  小地图坐标（推荐）：窗口里 mm=黄点在小地图里的 x，任何位置都可靠，不看 CAM 状态；保存时选「小地图坐标」")
     print("  （左右记反了也没关系，保存时会自动排序）q 取消")
     band = (350, 650)                      # 背景滚动估计用的画面带（平台/树这一层，避开 HUD 和视差天空）
     prev_small = None
@@ -551,6 +596,7 @@ def do_patrol_bounds():
         game = rect(f)
         p = rp.locate_player(game)
         px = None if p is None else int(p[0])
+        mm = mmt.locate(game) if mmt is not None else None
         gray = cv2.cvtColor(game, cv2.COLOR_BGR2GRAY)
         # 镜头是否被顶住：玩家在动而背景不动 -> LOCKED；背景在滚 -> FOLLOWING
         small = cv2.resize(cv2.cvtColor(game[band[0]:band[1]], cv2.COLOR_BGR2GRAY), None, fx=0.25, fy=0.25,
@@ -581,8 +627,10 @@ def do_patrol_bounds():
                 cv2.line(vis, (x, 0), (x, out_h), color, 2)
                 cv2.putText(vis, key[0].upper(), (x + 4, out_h - 10), 0, 0.7, color, 2)
         # OpenCV 自带字体不支持中文，窗口内提示只能用英文
-        txt = (f"x={px if px is not None else '--'} wx={'--' if wx is None else int(wx)} s={rp.player_score:.2f} | CAM: {cam} | "
-               f"L={b.get('left_x')}/{b.get('left_wx')} R={b.get('right_x')}/{b.get('right_wx')} | l/r=set  s=save  q=cancel")
+        txt = (f"x={px if px is not None else '--'} wx={'--' if wx is None else int(wx)} mm={mm[0] if mm else '--'} s={rp.player_score:.2f} | CAM: {cam} | "
+               f"L={b.get('left_x')}/{b.get('left_wx')}/mm{b.get('left_mm')} R={b.get('right_x')}/{b.get('right_wx')}/mm{b.get('right_mm')} | l/r=set  s=save  q=cancel")
+        if mmt is not None:
+            mmt.draw(vis)
         if p is not None:
             x0, y0 = max(0, int(p[0]) - hw), max(0, int(p[1]) - up)
             cv2.rectangle(vis, (x0, y0), (min(out_w, int(p[0]) + hw), max(0, int(p[1]) - dn)), (255, 0, 255), 1)  # 地标框
@@ -593,12 +641,18 @@ def do_patrol_bounds():
         if k in (ord("q"), 27):
             break
         elif k in (ord("l"), ord("r")):
-            if px is None:
-                print("[!] 这一帧没定位到玩家（名牌被挡/爬梯时会这样），走两步再按")
+            if px is None and mm is None:
+                print("[!] 这一帧没定位到玩家（名牌被挡/爬梯时会这样），也没找到小地图黄点，走两步再按")
             else:
                 side = "left" if k == ord("l") else "right"
                 b[f"{side}_x"] = px
                 b[f"{side}_wx"] = None if wx is None else int(wx)
+                b[f"{side}_mm"] = None if mm is None else int(mm[0])
+                print(f"记录 {'左' if side == 'left' else '右'}端点 小地图x={b[f'{side}_mm']}  屏幕x={px}")
+                if px is None:
+                    print("    这一帧名牌没定位到：只记了小地图坐标（屏幕/地图坐标模式用不了这个端点）")
+                    lms.pop(side, None)
+                    continue
                 # 抠地标：玩家头顶上方的背景里挑最独特的一块（避开人物、地面怪、HUD；避开会错配的重复瓦片）
                 lm = pick_landmark(gray, px, int(p[1]), half_w=hw, boxes=((up, dn), (up + 100, dn + 100), (up + 200, dn + 200), (up + 50, dn)))
                 if lm is None:
@@ -612,17 +666,24 @@ def do_patrol_bounds():
                     print("    [!] 镜头正在跟随：屏幕坐标模式下这个端点无效；地图坐标模式(靠地标)可以用")
 
         elif k in (ord("s"), 13, 10):
-            if b.get("left_x") is None or b.get("right_x") is None:
+            has_screen = b.get("left_x") is not None and b.get("right_x") is not None
+            has_mm = b.get("left_mm") is not None and b.get("right_mm") is not None
+            if not has_screen and not has_mm:
                 print("[s] 还差一个端点：左端按 l、右端按 r")
-            elif abs(b["left_x"] - b["right_x"]) < 100:
+            elif has_mm and abs(b["left_mm"] - b["right_mm"]) < 8:
+                print(f"[s] 两个端点在小地图上只差 {abs(b['left_mm'] - b['right_mm'])} px，太近了，是不是记到同一个地方了？")
+            elif has_screen and not has_mm and abs(b["left_x"] - b["right_x"]) < 100:
                 print(f"[s] 两个端点只差 {abs(b['left_x'] - b['right_x'])} px，太近了，是不是记到同一个地方了？")
             else:
-                if b["left_x"] > b["right_x"]:      # 左右记反了：连同地图坐标和地标一起换
-                    b["left_x"], b["right_x"] = b["right_x"], b["left_x"]
-                    b["left_wx"], b["right_wx"] = b.get("right_wx"), b.get("left_wx")
+                key = "left_mm" if has_mm else "left_x"
+                if b[key] > b[key.replace("left", "right")]:      # 左右记反了：连同地图坐标和地标一起换
+                    for k_ in ("x", "wx", "mm"):
+                        b[f"left_{k_}"], b[f"right_{k_}"] = b.get(f"right_{k_}"), b.get(f"left_{k_}")
                     lms = {"left": lms.get("right"), "right": lms.get("left")}
-                entry = {"left_x": int(b["left_x"]), "right_x": int(b["right_x"]),
-                         "left_wx": b.get("left_wx"), "right_wx": b.get("right_wx"), "mode": "screen"}
+                entry = {"left_x": b.get("left_x"), "right_x": b.get("right_x"),
+                         "left_wx": b.get("left_wx"), "right_wx": b.get("right_wx"),
+                         "left_mm": b.get("left_mm"), "right_mm": b.get("right_mm"),
+                         "mode": "minimap" if has_mm else "screen"}
                 lm_dir = os.path.join("calibration", "landmarks"); os.makedirs(lm_dir, exist_ok=True)
                 entry["landmarks"] = []
                 for side in ("left", "right"):
@@ -636,12 +697,19 @@ def do_patrol_bounds():
                 st = settings()
                 st.setdefault("patrol", {})[m] = entry
                 app.save_settings(st)
-                print(f"已保存 {m} 的巡逻端点: 屏幕 {entry['left_x']}~{entry['right_x']}  地图 {entry['left_wx']}~{entry['right_wx']}  地标 {len(entry['landmarks'])} 个")
+                print(f"已保存 {m} 的巡逻端点: 小地图 {entry['left_mm']}~{entry['right_mm']}  屏幕 {entry['left_x']}~{entry['right_x']}  "
+                      f"地图 {entry['left_wx']}~{entry['right_wx']}  地标 {len(entry['landmarks'])} 个")
                 saved = True
-                if can_world:
-                    mode = choose("巡逻用哪种坐标", [("屏幕坐标（简单可靠；要求两端点都在镜头被顶住的位置）", "screen"),
-                                               ("地图坐标（靠地标校准，端点可以在任意位置）", "world")], allow_back=False)
-                    entry["mode"] = mode or "screen"
+                if can_world or (has_mm and has_screen):
+                    opts = []
+                    if has_mm:
+                        opts.append(("小地图坐标（推荐：黄点=绝对位置，端点可在任意处，名牌被挡也能继续巡逻）", "minimap"))
+                    if has_screen:
+                        opts.append(("屏幕坐标（简单可靠；要求两端点都在镜头被顶住的位置）", "screen"))
+                    if can_world:
+                        opts.append(("地图坐标（靠地标校准，端点可以在任意位置）", "world"))
+                    mode = choose("巡逻用哪种坐标", opts, allow_back=False)
+                    entry["mode"] = mode or entry["mode"]
                     st["patrol"][m] = entry
                     app.save_settings(st)
                     print(f"巡逻坐标模式: {entry['mode']}")
@@ -668,20 +736,28 @@ def menu_patrol():
     while True:
         m = cfg().get("monster", {}).get("current") or "(未选怪物)"
         b = patrol_bounds_of(m)
-        cur = (f"屏幕 L={b['left_x']} R={b['right_x']}  地图 L={b.get('left_wx')} R={b.get('right_wx')}  模式={b.get('mode', 'screen')}"
+        cur = (f"小地图 L={b.get('left_mm')} R={b.get('right_mm')}  屏幕 L={b.get('left_x')} R={b.get('right_x')}  "
+               f"地图 L={b.get('left_wx')} R={b.get('right_wx')}  模式={b.get('mode', 'screen')}"
                if b else "未标定（巡逻按时间掉头）")
         act = choose(f"巡逻端点  地图: {m}  当前: {cur}", [
             ("标定端点（走到左端按 l / 右端按 r / s 保存）", do_patrol_bounds),
-            ("切换坐标模式（屏幕 / 地图）", "mode"),
+            ("切换坐标模式（小地图 / 屏幕 / 地图）", "mode"),
             ("清除本地图的端点", do_patrol_clear),
         ])
         if act is None:
             return
         if act == "mode":
-            if not b or not b.get("landmarks") or b.get("left_wx") is None:
-                print("本地图还没有带地标的端点标定（重新标一次端点即可生成）")
+            opts = []
+            if b and b.get("left_mm") is not None and b.get("right_mm") is not None:
+                opts.append(("小地图坐标（推荐）", "minimap"))
+            if b and b.get("left_x") is not None and b.get("right_x") is not None:
+                opts.append(("屏幕坐标", "screen"))
+            if b and b.get("landmarks") and b.get("left_wx") is not None:
+                opts.append(("地图坐标（地标校准）", "world"))
+            if not opts:
+                print("本地图还没有标定端点（先「标定端点」）")
                 continue
-            v = choose("巡逻坐标模式", [("屏幕坐标", "screen"), ("地图坐标（地标校准）", "world")])
+            v = choose("巡逻坐标模式", opts)
             if v:
                 set_setting(f"patrol.{m}.mode", v)
                 print("已保存")

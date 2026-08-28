@@ -1,6 +1,11 @@
-# game_vision — 外置摄像头游戏目标检测 MVP
+# game_vision — 外置视觉的冒险岛目标检测 / 自动巡逻
 
-摄像头拍摄显示器上的冒险岛画面 → 透视矫正 → 定位玩家 → 截取玩家前方 ROI → 模板匹配树桩（木妖）→ 多帧去抖 → 输出 `detected=True/False`。
+取得游戏画面（**NDI 网络流**，或摄像头拍显示器）→ 矫正成 1280×720 → 定位玩家（名牌）→ 截取玩家前方 ROI → 模板匹配怪物 → 多帧去抖 → 决策 → Pico 按键。
+
+画面来源两种（`camera.source`）：
+- **NDI（当前）**：B 机游戏 → B 机 OBS 开 NDI 输出（DistroAV）→ 局域网 → **本机脚本直接收**（`ndi:Game-PC`）。不经过本机 OBS/虚拟摄像头，
+  不需要 v4l2loopback/sudo；画面像素级清晰、无透视畸变。需要 `pip install cyndilib`。
+- 摄像头（旧）：Insta360 拍显示器，`camera.source: Insta360`，要手动标定四角。
 
 ## 环境
 Python 3.10+，依赖见 `requirements.txt`：
@@ -15,12 +20,16 @@ python menu.py
 ```
 数字选功能即可，不用记命令。首次使用按顺序做：
 
-1. **设置 → 摄像头**（默认 0；可填编号或名称关键字，Ubuntu 上填 `Insta360` 即可，编号变了也能找到；菜单会列出检测到的摄像头）
-2. **标定屏幕四角**：依次点击游戏画面 左上 → 右上 → 右下 → 左下，按 `s` 保存
+1. **设置 → 摄像头**：菜单会列出本机摄像头和**局域网上的 NDI 源**。NDI 填 `ndi:源名关键字`（如 `ndi:Game-PC`）；
+   摄像头填编号或名称关键字（如 `Insta360`，编号变了也能找到）
+2. **标定屏幕四角**：NDI/采集卡选「自动」（整幅画面就是游戏，自动取非黑区域；B 机 OBS 画布比游戏窗口大时右/下黑边会被切掉）；
+   摄像头拍屏选「手动」，依次点击游戏画面 左上 → 右上 → 右下 → 左下，按 `s` 保存。
+   **换了画面来源（相机↔NDI）后，标定和名牌/怪物模板都要在新画面上重做**（清晰度、缩放都变了）。
 3. **玩家设置 → 新增玩家**：输入玩家 ID，点一下弹窗取焦点 → 按空格定格 → **贴紧框住名牌**（黑底白字的名字条，有公会牌一起框；不要带角色的脚和背景，否则定位会乱跟）→ 按 `s`
 4. **怪物模板 → 新建怪物** → **手动抠模板** 抠 2–3 张种子 → **半自动采集**（录 2 分钟 → 自动弹出候选缩略图 → 输入编号保存）
    → **模板去重**（模板超过 ~20 张时做一次：耗时 ≈ ROI 面积 × 模板数 × 2，45 张≈110ms/帧，15 张≈40ms）
 5. **巡逻端点**（P7 位置巡逻）：用你自己的键盘把角色走到想让它掉头的左位置按 `l`、右位置按 `r`、`s` 保存。
+   **推荐选「小地图坐标」**：用左上角小地图的黄点定位，端点可在任意位置、名牌被挡也照走（见下方「小地图巡逻」）。以下屏幕/地图坐标是旧方案：
    窗口顶部 `CAM: LOCKED` 表示镜头被地图边界顶住、这里的屏幕 x 可靠；`FOLLOWING` 表示镜头在跟随、此处记的点无效。
    端点按怪物名存在 `settings.yaml` 的 `patrol` 段；没标端点时巡逻退化为「走 walk_max_ms 后掉头」。
    保存后若两端都抠到了地标，会问用哪种坐标：**屏幕坐标**（简单可靠，要求端点在镜头被顶住处）或
@@ -62,9 +71,10 @@ python menu.py
 ## 配置 `config.yaml`
 | 段 | 关键项 | 说明 |
 |---|---|---|
-| camera | source / width / height | 摄像头编号 / 名称关键字（如 `Insta360`）/ 视频路径；建议 1080p 采集 |
+| camera | source / width / height / ndi_transport | `ndi:<源名关键字>` / 摄像头编号 / 名称关键字（如 `Insta360`）/ 视频路径。`ndi_transport: tcp`（默认；libndi 默认的 RUDP/UDP 在本网上连得上但收不到帧） |
 | screen | output_width/height | 矫正后虚拟游戏画面尺寸（**模板尺寸与其绑定**，改了要重抠模板） |
-| roi.player | template / match_threshold / local_threshold / track_window / mid_window / mid_threshold | 用玩家名牌定位玩家：小窗跟踪(±120) → 丢了先在上一位置 ±mid_window 内找(≥mid_threshold 0.72，靠位置连续性认边缘处的低分真名牌) → 再全局搜(≥match_threshold 0.82) |
+| roi.player | template / match_threshold / local_threshold / track_window / mid_window / mid_threshold | 用玩家名牌定位玩家：小窗跟踪(±120) → 丢了先在上一位置 ±mid_window 内找(≥mid_threshold，靠位置连续性认边缘处的低分真名牌) → 再全局搜(≥match_threshold)。摄像头拍屏用 0.82/0.72/0.65；**NDI 清晰画面名牌半透明、暗背景真值只 0.76–0.8，模板只抠名字一圈以内（32×12），阈值 0.70/0.62/0.55**（假峰 ≤0.46） |
+| minimap | enabled / region / px_scale / yellow_lo,hi / min_area,max_area | 小地图黄点定位（`minimap.py`）；`patrol.<怪物>.mode: minimap` 时巡逻用它。region 要把整个小地图窗口（含右/下边框）框进来 |
 | roi.world | enabled / deadband / lock_frames / landmark_thr / fix_every / landmark_box | 地图 x 估计（`worldpos.py`）：屏幕 x + 累加镜头位移(bg_dx)，靠地图边界归零或地标匹配防漂移。端点标定时会自动抠地标 |
 | roi | facing / near_offset / far_offset / up / down / scroll_band | 玩家前方 ROI（up/down 只覆盖同一层，默认 70/20）。`facing`: **`key`**(用决策按住的方向键定朝向，只检测前进方向，推荐) / `auto`(按位移估计) / `right` / `left` / `both`。far_offset 现为 140（攻击区，不追怪）。scroll_band 是估计背景滚动量的画面带 |
 | roi.facing_auto | window / min_move | 前进方向判定：累计最近 N 帧的“角色屏幕位移 − 背景滚动位移”，超过 min_move 像素才切换方向 |
@@ -74,6 +84,28 @@ python menu.py
 | control | stuck_ms / stuck_move_px / stuck_scroll_px | P9 卡住检测：按着方向键 1.5 s 内玩家 x 没动且背景没滚 → `stuck`（只报警） |
 | control | jump_on_stuck / jump_key / jump_recover_ms / jump_max_retry / jump_clear_px | P10 跳跃恢复（默认关）：卡住 → 按着方向键点跳；连续 3 次无效 → 掉头；离开卡住点 40 px 才算脱困 |
 | monster | current / ask_on_start | 怪物模板集（`templates/<name>/`）；启动时菜单选择，运行中 `m` 切换 |
+| control.human_* | human_jump_per_min / human_jump_min_gap_ms / human_endpoint_px / human_pause_ms / human_walk_jitter | 拟人随机：巡逻中按泊松间隔随机跳（默认 4/min）；每次掉头下一个端点随机多走/少走 ±60px、停 0~800ms 再走；时间巡逻步长 ±20%。攻击/卡住恢复/停顿期间不跳。菜单「设置→拟人随机动作」可改，0=关 |
+
+## 小地图巡逻（`minimap.py`，推荐的巡逻坐标）
+左上角「小地图」里的**黄点 = 自己在整张地图里的绝对位置**：不受镜头跟随/顶住影响，也不会被宠物名牌、怪物挡住。
+- 每帧按窗口边框颜色自动找到缩略图区域（不同地图的缩略图大小不同、窗口被拖动都没关系），只在区域内找黄点
+  （标题栏按钮、表头太阳图标也是黄的，必须排除）。实测 90 s 录像 2341 帧全部抓到、零跳变。
+- 端点存黄点**相对缩略图左上角**的 x（`settings.yaml` → `patrol.<怪物>.left_mm/right_mm`，`mode: minimap`）；
+  交给巡逻逻辑时乘 `minimap.px_scale`(10)，`patrol_tolerance` 30 px ≈ 3 个小地图像素。1 个小地图像素 ≈ 10 个画面像素（勇士部落东入口）。
+- 名牌丢了但黄点还在 → 继续巡逻不松键（攻击靠名牌 ROI，名牌丢了自然不会打）。实测宠物压名牌 260 帧全部照走，LOST 0%。
+- 标定：菜单「巡逻端点 → 标定端点」，走到两端按 l / r（窗口里 `mm=` 就是黄点 x，任何位置都可靠，不用看 CAM 状态），保存时选「小地图坐标」。
+
+## NDI 注意（2026-08-28 实测：B=Windows OBS 32 + DistroAV，A=Ubuntu Wi-Fi）
+- 接收用 `cyndilib`（自带 libndi 6，不用装 NDI SDK），`camera.py` 里 `ndi:` 前缀走这条路；`python -c "from camera import list_ndi_sources; print(list_ndi_sources())"` 列源。
+- **必须 TCP**：libndi 默认优先 RUDP(UDP)，实测 TCP 控制连接建立、tally 都通，但视频一帧不来（本机 OBS 也是走 TCP 才有画面）。
+  `camera.py` 自动生成 `.ndi/ndi-config.v1.json`（只开 tcp）并设 `NDI_CONFIG_DIR`，必须在 import cyndilib 前设置。
+- 取帧用 frame_sync：永远最新帧，处理慢了自动丢旧帧；实测 1920×1080@30，全流程 25 fps、单帧 25 ms。
+- 任何要读实时画面的工具都必须走 `camera.FrameSource`（菜单的采集/标定/抠模板、`tools/harvest_templates.py` 都已是）；
+  直接 `cv2.VideoCapture("ndi:...")` 会得到 0 帧（半自动采集曾因此"没有找到任何候选"）。
+- Wi-Fi 上一路 1080p 约 110 Mbit/s；本机 OBS 同时也在收就是两路，尽量别再开第三个接收端。
+- **不要把 B 机改成 720p 输出**：模拟实测名牌假峰从 0.48 涨到 0.68（阈值 0.70），会跟错；处理耗时也不会少（矫正后都是 1280×720）。
+  掉帧先查本机 CPU：跑图时别同时跑采集/去重/离线分析，A 机 OBS 不看画面时可以把它的 NDI 源停掉。
+- **Pico 的按键是发到 B 机当前焦点窗口的**：B 机开着 OBS 时要把游戏窗口点回前台，否则脚本"OK"了但角色不动。
 
 ## Ubuntu / Linux 注意
 - 必须装 `opencv-python`（带 GUI）。若环境里有 `opencv-python-headless`（例如 easyocr 带进来的），`imshow` 会报错，先 `pip uninstall opencv-python-headless` 再 `pip install "opencv-python>=4.8,<5"`。
@@ -82,7 +114,8 @@ python menu.py
 - Insta360 Ace Pro 2（webcam 模式）通过 UVC 只暴露 Brightness，曝光/白平衡/对焦无法从 A 端锁定，靠环境光稳定（避免窗户强光直射）。
 
 ## 标定文件
-`calibration/homography.json` 是实机摄像头的四角（`--calibrate` 会覆盖它）；`homography_shot_mp4.json` 是 shot.mp4 对应的标定。
+`calibration/homography.json` 是当前画面来源的四角（`--calibrate` 手动 / `--auto-calib` 自动 都会覆盖它）；现在是 NDI 的自动标定（游戏区域 1853×1042 在 1920×1080 画布左上）。
+`homography_insta360_20260827.json` 是之前 Insta360 拍屏的标定（换回相机时 `--calib` 指定它）；`homography_shot_mp4.json` 是 shot.mp4 对应的标定。
 **所有命令都支持 `--calib 路径`**：离线处理某段视频时务必指定它自己的标定文件，否则实机标定和离线视频会互相打架、模板和检测全部错位。
 
 ## 采集怪物模板（推荐：半自动，实机流程）

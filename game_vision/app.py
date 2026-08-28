@@ -23,12 +23,13 @@ import cv2
 import yaml
 
 from camera import FrameSource, open_writer
-from calibration import Rectifier, load_corners, run_calibration_ui
+from calibration import Rectifier, auto_corners, load_corners, run_calibration_ui, save_corners
 from debounce import Debouncer
 from detector import TemplateDetector
 from roi import ROIProvider
 from decision import Decision, DryRunActuator, PicoActuator
 from worldpos import WorldTracker
+from minimap import MinimapTracker
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_ROOT = "templates"
@@ -187,6 +188,8 @@ def main(argv=None):
     ap.add_argument("--config", default=os.path.join(HERE, "config.yaml"))
     ap.add_argument("--source", default=None, help="摄像头编号或视频路径，覆盖配置")
     ap.add_argument("--calibrate", action="store_true", help="强制重新标定")
+    ap.add_argument("--auto-calib", action="store_true",
+                    help="自动标定：整幅画面就是游戏画面（NDI/采集卡），取非黑区域外接矩形当四角并保存")
     ap.add_argument("--calib", default=None, help="标定文件路径（默认 config 里的 screen.calibration_file）")
     ap.add_argument("--no-show", action="store_true")
     ap.add_argument("--monster", default=None, help="怪物模板集名称（templates/ 下的目录名）")
@@ -221,7 +224,8 @@ def main(argv=None):
     print(f"[app] 当前怪物模板集: {monster}")
 
     cam = cfg["camera"]
-    src = FrameSource(str(source), cam["width"], cam["height"], cam.get("loop_video", False))
+    src = FrameSource(str(source), cam["width"], cam["height"], cam.get("loop_video", False),
+                      ndi_transport=cam.get("ndi_transport", "tcp"))
     if args.start and src.is_file:
         src.seek(args.start)
 
@@ -231,7 +235,14 @@ def main(argv=None):
         sc["calibration_file"] = os.path.abspath(args.calib) if os.path.isabs(args.calib) else args.calib
     out_w, out_h = sc["output_width"], sc["output_height"]
     print(f"[calib] 标定文件: {sc['calibration_file']}")
-    corners = None if args.calibrate else load_corners(sc["calibration_file"])
+    corners = None if (args.calibrate or args.auto_calib) else load_corners(sc["calibration_file"])
+    if corners is None and args.auto_calib:
+        ok, frame = src.read()
+        if not ok:
+            raise RuntimeError("读不到画面，无法自动标定")
+        corners, size = auto_corners(frame)
+        save_corners(sc["calibration_file"], corners, size)
+        print(f"[calib] 自动标定：画面 {size[0]}x{size[1]}，游戏区域 {corners.tolist()} -> 已保存")
     if corners is None:
         print("[calib] 未找到标定文件或要求重新标定，进入标定界面")
         corners = run_calibration_ui(src, sc["calibration_file"], out_w, out_h)
@@ -245,6 +256,8 @@ def main(argv=None):
     det_cfg = cfg["detection"]
     detector = build_detector(monster, det_cfg)
     roi_provider = ROIProvider(cfg["roi"], out_w, out_h)
+    mm_cfg = cfg.get("minimap") or {}
+    minimap = MinimapTracker(mm_cfg, out_w, out_h) if mm_cfg.get("enabled", True) else None
     db = cfg["debounce"]
     debouncer = Debouncer(db["window_size"], db["enter_min_hits"], db["exit_min_misses"])
 
@@ -274,7 +287,11 @@ def main(argv=None):
             tracker.add_landmark(lm["name"], g, lm["world_x"], lm["y"], wcfg.get("landmark_thr", 0.8))
         print(f"[world] 地图坐标估计已开，地标 {len(tracker.landmarks)} 个")
     # P7 巡逻端点按地图（=怪物模板集）存在 settings.yaml 的 patrol 段，这里取出当前这张的
-    if patrol_mode == "world" and pb.get("left_wx") is not None and pb.get("right_wx") is not None and tracker is not None:
+    if patrol_mode == "minimap" and pb.get("left_mm") is not None and pb.get("right_mm") is not None and minimap is not None:
+        ctl_cfg["patrol_left_x"], ctl_cfg["patrol_right_x"] = minimap.to_map_x(pb["left_mm"]), minimap.to_map_x(pb["right_mm"])
+        print(f"[ctl] 位置巡逻端点({monster}, 小地图坐标): left_mm={pb['left_mm']} right_mm={pb['right_mm']}"
+              f"（黄点在小地图缩略图里的画面 x，×{minimap.px_scale:g} 交给巡逻逻辑）")
+    elif patrol_mode == "world" and pb.get("left_wx") is not None and pb.get("right_wx") is not None and tracker is not None:
         ctl_cfg["patrol_left_x"], ctl_cfg["patrol_right_x"] = pb["left_wx"], pb["right_wx"]
         print(f"[ctl] 位置巡逻端点({monster}, 地图坐标): left_wx={pb['left_wx']} right_wx={pb['right_wx']}"
               f"（先朝 {ctl_cfg.get('start_dir', 'right')} 走找地标）")
@@ -329,6 +346,7 @@ def main(argv=None):
             game = rect(frame)
             rois = roi_provider.rois(game)
             bg_dx = roi_provider.measure_scroll(game)   # 背景滚动量（P9 卡住检测：人不动+背景不动 才算卡）
+            mm = minimap.locate(game) if minimap is not None else None   # 小地图黄点（相对缩略图左上角）
             world_x = lm_fix = None
             if tracker is not None:
                 px_t = roi_provider.last_player[0] if (roi_provider.last_player and roi_provider.lost_frames == 0) else None
@@ -352,13 +370,17 @@ def main(argv=None):
             ctl_state = None
             if decision is not None:
                 px_now = roi_provider.last_player[0] if roi_provider.last_player else None
-                if patrol_mode == "world":
+                player_ok = roi_provider.last_player is not None and roi_provider.lost_frames == 0
+                if patrol_mode == "minimap":
+                    # 小地图坐标模式：黄点在就继续巡逻——名牌被宠物/怪挡住时不必松键（攻击靠名牌 ROI，名牌丢了自然不会打）
+                    x_for_patrol = minimap.to_map_x(mm[0]) if mm is not None else None
+                    player_ok = player_ok or mm is not None
+                elif patrol_mode == "world":
                     # 地图坐标模式：校准过才把位置交给巡逻逻辑；没校准前给 None -> 一直走去找地标
                     x_for_patrol = world_x if (tracker is not None and tracker.localized) else None
                 else:
                     x_for_patrol = px_now
-                ctl_state = decision.update(roi_provider.last_player is not None and roi_provider.lost_frames == 0,
-                                            detected, best_roi[0] if best_roi else None, dist,
+                ctl_state = decision.update(player_ok, detected, best_roi[0] if best_roi else None, dist,
                                             player_x=x_for_patrol, bg_dx=bg_dx)
                 if decision.stuck and not was_stuck:
                     print(f"[ctl] STUCK #{decision.stuck_count}: 按着 {decision.held} 但 x={px_now} 不动、背景不滚（第 {src.frame_index} 帧）")
@@ -377,7 +399,7 @@ def main(argv=None):
                    "patrol_target": decision.patrol_target if decision else None,
                    "bg_dx": round(bg_dx, 1), "stuck": decision.stuck if decision else None,
                    "world_x": None if world_x is None else round(world_x), "cam_x": None if tracker is None else round(tracker.cam_x),
-                   "lm_fix": lm_fix, "localized": tracker.localized if tracker else None,
+                   "lm_fix": lm_fix, "localized": tracker.localized if tracker else None, "mm": mm,
                    "cmds": (decision.act.frame_cmds[:] or None) if decision else None,
                    "latency_ms": round(latency_ms, 2)}
             log_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -392,6 +414,8 @@ def main(argv=None):
                 if roi_provider.last_player:
                     px, py = map(int, roi_provider.last_player)
                     cv2.drawMarker(vis, (px, py), (255, 0, 255), cv2.MARKER_CROSS, 20, 2)
+                if minimap is not None:
+                    minimap.draw(vis)
                 for name, (x1, y1, x2, y2) in rois:
                     cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 255, 0), 1)
                 if decision is not None:

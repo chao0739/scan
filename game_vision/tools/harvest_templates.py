@@ -3,6 +3,7 @@
 第 1 步 scan：用少量种子模板低阈值扫整段视频，把候选自动抠出并拼成编号缩略图。
     实机（摄像头 0 现场录 120 秒再扫）：
     python tools/harvest_templates.py scan --source 0 --seconds 120 --seeds templates/stump_map01 --name stump_map01
+    python tools/harvest_templates.py scan --source ndi:Game-PC --seconds 120 --seeds templates/shuren --name shuren   # NDI 源
     或对已有录像（app.py 里按 r 录的 recordings/*.mp4）：
     python tools/harvest_templates.py scan --source recordings/rec_xxx.mp4 --seeds templates/stump_map01 --name stump_map01
     -> 生成 harvest/<name>/sheet.jpg（编号缩略图）和 candidates.json
@@ -29,7 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 from calibration import Rectifier, load_corners  # noqa: E402
-from camera import open_writer, open_camera, resolve_source  # noqa: E402
+from camera import FrameSource, open_writer, resolve_source, is_ndi_source  # noqa: E402
 
 HARVEST_DIR = "harvest"
 MARGIN = 8  # 缩略图上下文边距（保存模板时不含）
@@ -58,38 +59,49 @@ def scan(args):
     seeds = load_seeds(args.seeds)
     y1, y2 = (map(int, args.band.split(","))) if args.band else (int(out_h * 0.1), int(out_h * 0.85))
 
-    src = resolve_source(args.source)
-    live = isinstance(src, int)
+    # 实时源（摄像头编号/名称关键字，或 ndi:xxx）：先录制 --seconds 秒到 recordings/，再按文件流程处理（便于之后 pick 复用）。
+    # 之前只认摄像头编号，"ndi:Game-PC" 被当成视频文件路径 -> 0 帧 -> "没有找到任何候选"（2026-08-28 用户实测）
+    live = is_ndi_source(args.source) or isinstance(resolve_source(args.source), int)
     if live:
-        # 直接用摄像头：先录制 --seconds 秒到 recordings/，再按文件流程处理（便于之后 pick 复用）
-        cap = open_camera(src, cfg["camera"]["width"], cfg["camera"]["height"])
+        cap = FrameSource(args.source, cfg["camera"]["width"], cfg["camera"]["height"],
+                          ndi_transport=cfg["camera"].get("ndi_transport", "tcp"))
         os.makedirs("recordings", exist_ok=True)
         rec_base = os.path.abspath(os.path.join("recordings", f"harvest_{args.name}"))
         rec_path = rec_base + ".mp4"
-        fps = cap.get(cv2.CAP_PROP_FPS)
         writer = None
         import time
         t_end = time.time() + args.seconds
         n = 0
-        print(f"[rec] 摄像头录制 {args.seconds}s -> {rec_path}  (按 q 提前结束)")
+        # 无显示环境（自动化测试）只录不显示：Linux 下没有 DISPLAY 时 imshow 会直接让进程崩溃（Qt 插件），不能靠 try/except
+        show = bool(os.environ.get("DISPLAY")) or not sys.platform.startswith("linux")
+        print(f"[rec] 录制 {args.seconds}s -> {rec_path}  (按 q 提前结束)" if show else f"[rec] 录制 {args.seconds}s -> {rec_path}（无显示环境，不预览）")
         while time.time() < t_end:
             ok, f = cap.read()
             if not ok:
                 break
             if writer is None:
-                writer, rec_path = open_writer(rec_base, fps, (f.shape[1], f.shape[0]))
+                writer, rec_path = open_writer(rec_base, cap.fps, (f.shape[1], f.shape[0]))
                 print(f"[rec] 实际分辨率 {f.shape[1]}x{f.shape[0]} -> {rec_path}")
             writer.write(f)
             n += 1
-            cv2.imshow("recording (q to stop)", cv2.resize(f, (960, 540)))
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+            if show:
+                try:
+                    cv2.imshow("recording (q to stop)", cv2.resize(f, (960, 540)))
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+                except cv2.error:
+                    show = False      # 无显示环境（自动化测试）：只录不显示
         cap.release()
         if writer is not None:
             writer.release()
-        cv2.destroyAllWindows()
+        if show:
+            cv2.destroyAllWindows()
         print(f"[rec] 录制完成 {n} 帧")
+        if n == 0:
+            raise SystemExit(f"画面源 {args.source} 读不到帧，无法采集")
         args.source = rec_path
+    elif not os.path.exists(str(args.source)):
+        raise SystemExit(f"画面源 {args.source} 既不是摄像头/NDI 也不是存在的视频文件")
 
     cap = cv2.VideoCapture(args.source)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
