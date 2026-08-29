@@ -7,12 +7,23 @@
   不需要 v4l2loopback/sudo；画面像素级清晰、无透视畸变。需要 `pip install cyndilib`。
 - 摄像头（旧）：Insta360 拍显示器，`camera.source: Insta360`，要手动标定四角。
 
-## 环境
-Python 3.10+，依赖见 `requirements.txt`：
+## 环境 / 安装
+Python 3.10+。**一键安装**（在仓库根目录，会建 `.venv` 虚拟环境并装依赖，约 100 MB）：
 
 ```bash
-pip install -r requirements.txt
+./install.sh            # Linux / macOS；Windows 双击 install.bat
+./run.sh                # 启动菜单；Windows 双击 run.bat
 ```
+
+要从游戏客户端 `aa/` 导出精灵图（`tools/wz_sprites.py`）的机器加 `--tools`（装 UnityPy/lz4）。
+手动装也行：`pip install -r requirements.txt`（可选 `-r requirements-tools.txt`）。cyndilib 自带 libndi，Windows/Linux/macOS 都有预编译包，不用装 NDI SDK。
+Ubuntu 系统自带的 python3 建不了虚拟环境（缺 `python3-venv`）时脚本会提示 `sudo apt install python3 python3-venv`（交互时可当场装）；有 miniconda 的机器会直接用 conda 的 python。
+Ubuntu 若报缺 `libGL.so.1`：`sudo apt install libgl1 libglib2.0-0`；NDI 源发现靠 mDNS，要有 `avahi-daemon`（桌面版默认有）。
+
+## 部署到另一台电脑
+完整步骤（游戏机 D + 脚本机 C 两边各要做什么）见仓库根目录的 **`README.md`**。要点：
+`python tools/pack.py [--with-wz]` 打成 zip → C 机解压后 `./install.sh` / `./run.sh` → 菜单里设「画面来源」（NDI 源名）、「标定屏幕四角」（自动）、「Pico」（自动发现或填 IP）。
+D 机只需要 OBS + DistroAV 开 NDI 输出，并把 Pico 插在它的 USB 上。同一角色/地图的名牌模板、怪物模板、巡逻端点都随包，不用重做。
 
 ## 快速开始（菜单式，推荐）
 ```bash
@@ -76,7 +87,7 @@ python menu.py
 | screen | output_width/height | 矫正后虚拟游戏画面尺寸（**模板尺寸与其绑定**，改了要重抠模板） |
 | app | show / run_seconds / cv_threads | 菜单「开始检测」的运行方式：不开窗口、到时自动停；`cv_threads: 2`——ROI 只有 300×90，OpenCV 8 线程切不开只是空转（帧率相同、CPU 241% → 148%） |
 | roi.player | template / match_threshold / local_threshold / track_window / mid_window / mid_threshold | 用玩家名牌定位玩家：小窗跟踪(±120) → 丢了先在上一位置 ±mid_window 内找(≥mid_threshold，靠位置连续性认边缘处的低分真名牌) → 再全局搜(≥match_threshold)。摄像头拍屏用 0.82/0.72/0.65；**NDI 清晰画面名牌半透明、暗背景真值只 0.76–0.8，模板只抠名字一圈以内（32×12），阈值 0.70/0.62/0.55**（假峰 ≤0.46）。全局搜索是「粗到精」（`global_coarse_scale: 0.5` / `topk: 20`：缩小找 20 个峰再全分辨率精修，11 ms → 3.7 ms，620 帧只漏 1 帧且下一帧即补）；`global_coarse_scale: 0` 回到整幅全分辨率搜 |
-| minimap | enabled / region / px_scale / yellow_lo,hi / min_area,max_area | 小地图黄点定位（`minimap.py`）；`patrol.<怪物>.mode: minimap` 时巡逻用它。region 要把整个小地图窗口（含右/下边框）框进来 |
+| minimap | enabled / region / px_scale / yellow_lo,hi / min_area,max_area / ui_dir / anchor_min | 小地图黄点定位（`minimap.py`）；`patrol.<怪物>.mode: minimap` 时巡逻用它。region 要把整个小地图窗口（含右/下边框）框进来。缩略图区域靠 `templates/_ui/` 三块窗口 UI 模板（标题栏左端/右端、底部条纹）定位，匹配分 <`anchor_min` 沿用上次区域 |
 | roi.world | enabled / deadband / lock_frames / landmark_thr / fix_every / landmark_box | 地图 x 估计（`worldpos.py`）：屏幕 x + 累加镜头位移(bg_dx)，靠地图边界归零或地标匹配防漂移。端点标定时会自动抠地标 |
 | roi | facing / near_offset / far_offset / up / down / scroll_band | 玩家前方 ROI（up/down 只覆盖同一层，默认 70/20——上 135 会把上层平台的怪框进来、站在下面对着够不着的怪挥刀）。near_offset<0 时两侧矩形重叠会自动合并成一个（不重复匹配，怪在哪侧按位置判断）。**菜单「设置 → 检测范围」可在画面上拖框设置**：定格后在角色面朝一侧拖框，自动换算成相对脚底的前/后/上/下距离（左侧拖也行，运行时左右镜像；near 为负 = 从身后开始）。`facing`: **`key`**(用决策按住的方向键定朝向，只检测前进方向，推荐) / `auto`(按位移估计) / `right` / `left` / `both`。far_offset 现为 140（攻击区，不追怪）。scroll_band 是估计背景滚动量的画面带 |
 | roi.facing_auto | window / min_move | 前进方向判定：累计最近 N 帧的“角色屏幕位移 − 背景滚动位移”，超过 min_move 像素才切换方向 |
@@ -90,12 +101,16 @@ python menu.py
 
 ## 小地图巡逻（`minimap.py`，推荐的巡逻坐标）
 左上角「小地图」里的**黄点 = 自己在整张地图里的绝对位置**：不受镜头跟随/顶住影响，也不会被宠物名牌、怪物挡住。
-- 每帧按窗口边框颜色自动找到缩略图区域（不同地图的缩略图大小不同、窗口被拖动都没关系），只在区域内找黄点
-  （标题栏按钮、表头太阳图标也是黄的，必须排除）。实测 90 s 录像 2341 帧全部抓到、零跳变。
+- 缩略图区域用窗口自己的 UI 图样定位（`templates/_ui/minimap_title.png` 标题栏左端 → 左/上边；`minimap_title_right.png`「大地图」按钮 → 右边；
+  `minimap_bottom.png` 底部 9 行条纹 → 下边），不同地图缩略图大小不同、窗口被拖动都没关系，只在区域内找黄点（标题栏按钮、表头太阳图标也是黄的，必须排除）。
+  2026-08-29 前按「偏蓝灰浅色 = 边框」统计找区域，在岩壁/天空背景的地图（野猪的领土）会把窗口右边的游戏背景当成缩略图，26% 的帧丢黄点（一丢十几秒）；
+  改后野猪录像 876 采样帧 0 丢失、区域恒定，树人录像不变。小地图窗口**收起**（只剩标题栏）时黄点自然没有，巡逻退回按时间掉头。
 - 端点存黄点**相对缩略图左上角**的 x（`settings.yaml` → `patrol.<怪物>.left_mm/right_mm`，`mode: minimap`）；
   交给巡逻逻辑时乘 `minimap.px_scale`(10)，`patrol_tolerance` 30 px ≈ 3 个小地图像素。1 个小地图像素 ≈ 10 个画面像素（勇士部落东入口）。
 - 名牌丢了但黄点还在 → 继续巡逻不松键（攻击靠名牌 ROI，名牌丢了自然不会打）。实测宠物压名牌 260 帧全部照走，LOST 0%。
 - 标定：菜单「巡逻端点 → 标定端点」，走到两端按 l / r（窗口里 `mm=` 就是黄点 x，任何位置都可靠，不用看 CAM 状态），保存时选「小地图坐标」。
+  按 l/r 时 `mm=--`（黄点没找到）会明确警告：那个端点只有屏幕坐标，镜头跟随时屏幕 x 不变、走多远都会被判「太近」。
+  两端点间距 < 2×`patrol_tolerance`（默认 100 画面 px ≈ 10 小地图 px）时提示并询问是否仍保存（测试可以硬存；跑起来会在端点附近原地抽搐，正式用拉开到 ≥3×tolerance）。
 
 ## NDI 注意（2026-08-28 实测：B=Windows OBS 32 + DistroAV，A=Ubuntu Wi-Fi）
 - 接收用 `cyndilib`（自带 libndi 6，不用装 NDI SDK），`camera.py` 里 `ndi:` 前缀走这条路；`python -c "from camera import list_ndi_sources; print(list_ndi_sources())"` 列源。

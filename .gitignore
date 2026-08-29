@@ -19,3 +19,7 @@ game_vision/calibration/landmarks/
 aa/
 # 从客户端导出的全怪物精灵图模板库（tools/wz_sprites.py extract-all 可重建，~30 MB）
 game_vision/templates/_wz/
+
+# 一键安装的虚拟环境 / 打包输出
+.venv/
+dist/

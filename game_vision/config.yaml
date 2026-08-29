@@ -21,6 +21,12 @@ minimap:               # 左上角小地图黄点 = 玩家绝对地图位置（m
   yellow_hi: [38, 255, 255]
   min_area: 10               # 黄点面积范围（720p 下实测 15~45；地图上零星黄色 ≤6）
   max_area: 90
+  ui_dir: templates/_ui      # 小地图窗口的三块 UI 模板（标题栏左端/右端、底部条纹）：缩略图区域靠它们定位，见 minimap.py 文件头
+  anchor_min: 0.8            # 模板匹配分低于此值=没找到窗口，沿用上一次区域
+  anchor_dx: 4               # 缩略图第一列 = 标题锚点 x + 4；第一行 = 锚点 y + 61；右边界 = 右锚点 x + 37（按 1280×720 矫正画面）
+  anchor_dy: 61
+  right_dx: 37
+  border_solid: 0.9          # 没有锚点模板时的兜底颜色找法：缩略图上/下边框线的实线比例下限
 
 screen:
   calibration_file: calibration/homography.json

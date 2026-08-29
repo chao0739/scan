@@ -783,6 +783,31 @@ def do_patrol_bounds():
     win = f"patrol bounds - {m}"
     cv2.namedWindow(win)
     saved = False
+    tol = int((c.get("control") or {}).get("patrol_tolerance", 50))
+    mm_scale = mmt.px_scale if mmt is not None else 10.0
+
+    def too_close_ok():
+        """两端点间距 < 2×patrol_tolerance 时，跑起来「到了左端同时也算到了右端」，角色会原地抽搐。
+        提示并让用户确认（测试时可以硬存；正式用请拉开到 ≥3×tolerance）。返回 True=可以保存。"""
+        has_mm_ = b.get("left_mm") is not None and b.get("right_mm") is not None
+        if has_mm_:
+            d = abs(b["left_mm"] - b["right_mm"]) * mm_scale
+            what = f"两个端点在小地图上只差 {abs(b['left_mm'] - b['right_mm'])} px（≈画面 {d:.0f} px）"
+        else:
+            d = abs(b["left_x"] - b["right_x"])
+            what = f"两个端点屏幕 x 只差 {d:.0f} px"
+            if any(str(v).startswith("FOLLOWING") for v in cam_at.values()):
+                what += "——记录时镜头在跟随（人一直在屏幕中间，走多远屏幕 x 都不变），这个数不代表真实距离；" \
+                        "要在镜头跟随区标端点得靠小地图坐标（mm），黄点没找到时先检查 minimap.region / 小地图窗口有没有被挡"
+        if d >= 2 * tol:
+            return True
+        print(f"[s] {what}，小于 2×patrol_tolerance={2 * tol}：跑起来会在端点附近原地来回抽搐，是不是记到同一个地方了？")
+        cv2.destroyWindow(win)
+        ans = ask("仍然保存？(y/N)", "n")
+        cv2.namedWindow(win)
+        return str(ans).strip().lower() in ("y", "yes")
+
+    cam_at = {}                            # side -> 记录那一刻的 CAM 状态
     while True:
         ok, f = src.read()
         if not ok:
@@ -839,10 +864,14 @@ def do_patrol_bounds():
                 print("[!] 这一帧没定位到玩家（名牌被挡/爬梯时会这样），也没找到小地图黄点，走两步再按")
             else:
                 side = "left" if k == ord("l") else "right"
+                cam_at[side] = cam
                 b[f"{side}_x"] = px
                 b[f"{side}_wx"] = None if wx is None else int(wx)
                 b[f"{side}_mm"] = None if mm is None else int(mm[0])
                 print(f"记录 {'左' if side == 'left' else '右'}端点 小地图x={b[f'{side}_mm']}  屏幕x={px}")
+                if mm is None:
+                    print("    [!] 这一帧小地图黄点没找到（窗口里 mm=--）：这个端点没有小地图坐标，只能靠屏幕/地图坐标；"
+                          "镜头跟随时屏幕 x 不变，走多远都会被判「太近」。等 mm 有数了再按一次")
                 if px is None:
                     print("    这一帧名牌没定位到：只记了小地图坐标（屏幕/地图坐标模式用不了这个端点）")
                     lms.pop(side, None)
@@ -864,10 +893,8 @@ def do_patrol_bounds():
             has_mm = b.get("left_mm") is not None and b.get("right_mm") is not None
             if not has_screen and not has_mm:
                 print("[s] 还差一个端点：左端按 l、右端按 r")
-            elif has_mm and abs(b["left_mm"] - b["right_mm"]) < 8:
-                print(f"[s] 两个端点在小地图上只差 {abs(b['left_mm'] - b['right_mm'])} px，太近了，是不是记到同一个地方了？")
-            elif has_screen and not has_mm and abs(b["left_x"] - b["right_x"]) < 100:
-                print(f"[s] 两个端点只差 {abs(b['left_x'] - b['right_x'])} px，太近了，是不是记到同一个地方了？")
+            elif not too_close_ok():
+                pass
             else:
                 key = "left_mm" if has_mm else "left_x"
                 if b[key] > b[key.replace("left", "right")]:      # 左右记反了：连同地图坐标和地标一起换

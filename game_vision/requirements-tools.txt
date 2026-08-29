@@ -1,0 +1,5 @@
+# 可选：只有「从游戏客户端 aa/ 目录导出原版精灵图」（tools/wz_sprites.py、菜单「从游戏原版精灵图导入」）才需要。
+# 已经有 templates/_wz 精灵库的机器不用装。
+-r requirements.txt
+UnityPy>=1.20
+lz4

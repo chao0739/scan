@@ -6,8 +6,6 @@
 
 ## 〇、当前状态一览
 
-> **final v3（2026-08-29）**：小地图区域定位改用窗口 UI 图样、全怪物精灵库 + 按名字搜索、一键安装/打包部署（根目录 `README.md`）。本文件冻结快照见 `archive/PROGRESS_final_v3_20260829.md`；路线图/规格文档已归档到 `archive/`。
-
 ```
 B 电脑(Windows, 冒险岛) --OBS DistroAV NDI 输出--> 局域网 --NDI(TCP)--> A 电脑(Ubuntu, cyndilib 直收 → 视觉+决策)
         ^                                                                          |

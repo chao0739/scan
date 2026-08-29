@@ -76,7 +76,7 @@ def list_monsters():
     out = []
     for d in sorted(os.listdir(TEMPLATE_ROOT)):
         p = os.path.join(TEMPLATE_ROOT, d)
-        if d == "players":
+        if d == "players" or d.startswith("_"):      # players=玩家名牌；_ui=小地图窗口图样、_wz=精灵库，都不是怪物集
             continue
         if os.path.isdir(p) and any(f.lower().endswith(".png") for f in os.listdir(p)):
             out.append(d)
