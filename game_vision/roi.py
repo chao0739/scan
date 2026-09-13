@@ -58,6 +58,16 @@ def tighten_nameplate(img, margin=2, white=170):
     return max(0, x0 - margin), max(0, y0 - margin), min(w, x1 + margin), min(h, y1 + margin)
 
 
+def text_mask_of(tpl_gray, white=170, dilate=1):
+    """名牌模板的「文字像素」掩码：亮度 > white 的像素（名字是白字）外扩 dilate 像素，把黑色描边一起带上。
+    返回 (core, mask)，都是 uint8 0/1：core = 纯文字像素（校验亮度用），mask = 外扩后的匹配掩码。
+    为什么：名牌底条是半透明的，模板里只有约 22% 像素是文字，其余底条/过渡区随背景变——亮地面/天空前整块 NCC 从 0.9 掉到 0.6~0.7。
+    只比文字像素，底条透出什么都不进分数。"""
+    core = (tpl_gray > white).astype(np.uint8)
+    mask = cv2.dilate(core, np.ones((3, 3), np.uint8), iterations=dilate) if dilate > 0 else core.copy()
+    return core, mask
+
+
 class ROIProvider:
     def __init__(self, cfg, frame_w, frame_h):
         self.cfg = cfg
@@ -111,6 +121,45 @@ class ROIProvider:
             self.coarse_topk, self.coarse_margin = int(pc.get("global_coarse_topk", 20)), int(pc.get("global_coarse_margin", 8))
             self._tpl_small = (cv2.resize(self.tpl, None, fx=self.coarse_scale, fy=self.coarse_scale, interpolation=cv2.INTER_AREA)
                                if self.coarse_scale > 0 else None)
+            # text_mask：只比文字像素（见 text_mask_of）。开了以后分数语义变化，match/local/mid/edge 四个阈值要用
+            # tools/nameplate_eval.py 在录像上重标。默认关 -> 下面所有匹配走原来的整块 NCC，行为不变。
+            tm = pc.get("text_mask") or {}
+            self.text_mask = bool(tm.get("enabled", False))
+            self.mask = self.mask_core = self.mask_small = self.mask_r = self.mask_l = None
+            self.tm_min_text, self.tm_min_contrast = float(tm.get("min_text", 150)), float(tm.get("min_contrast", 30))
+            if self.text_mask:
+                core, mask = text_mask_of(self.tpl, int(tm.get("white", 170)), int(tm.get("dilate", 1)))
+                if int(core.sum()) < 15:
+                    print(f"[roi] text_mask: 模板里亮于 {tm.get('white', 170)} 的文字像素只有 {int(core.sum())} 个，掩码匹配关闭")
+                    self.text_mask = False
+                else:
+                    self.mask_core, self.mask = core, mask
+                    self.mask_r, self.mask_l = mask[:, tw // 2:], mask[:, :tw - tw // 2]
+                    if self._tpl_small is not None:
+                        ms = cv2.resize(mask * 255, (self._tpl_small.shape[1], self._tpl_small.shape[0]), interpolation=cv2.INTER_AREA)
+                        self.mask_small = (ms > 64).astype(np.uint8)
+
+    @staticmethod
+    def _ncc(img, tpl, mask=None):
+        """TM_CCOEFF_NORMED；mask 不为 None 时只比掩码像素（掩码区全同色时 NCC 是 NaN，按 -1 处理）。"""
+        if mask is None:
+            return cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
+        return np.nan_to_num(cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED, mask=mask), nan=-1.0, posinf=-1.0, neginf=-1.0)
+
+    def _verify_text(self, gray, x, y):
+        """text_mask 的第二道校验：候选处的文字像素要够亮，且比文字外圈（描边/底条）亮出 min_contrast，
+        拒掉沙地/亮纹理凑出来的假峰（掩码只占模板 ~1/3 像素，单靠 NCC 分比整块匹配更容易被骗）。未开 text_mask 恒为 True。"""
+        if not self.text_mask:
+            return True
+        th, tw = self.tpl.shape
+        if x < 0 or y < 0 or x + tw > gray.shape[1] or y + th > gray.shape[0]:
+            return True                                   # 贴边半模板：候选框出画面，不校验
+        patch = gray[y:y + th, x:x + tw]
+        core = self.mask_core.astype(bool)
+        ring = self.mask.astype(bool) & ~core
+        t = float(patch[core].mean())
+        r = float(patch[ring].mean()) if ring.any() else 0.0
+        return t >= self.tm_min_text and (t - r) >= self.tm_min_contrast
 
     def _match(self, gray, x1, y1, x2, y2):
         th, tw = self.tpl.shape
@@ -123,9 +172,12 @@ class ROIProvider:
         sub = gray[y1:y2, x1:x2]
         if sub.shape[0] < th or sub.shape[1] < tw:
             return 0.0, None
-        res = cv2.matchTemplate(sub, self.tpl, cv2.TM_CCOEFF_NORMED)
+        res = self._ncc(sub, self.tpl, self.mask)
         _, mx, _, loc = cv2.minMaxLoc(res)
-        return float(mx), (x1 + loc[0], y1 + loc[1])
+        xy = (x1 + loc[0], y1 + loc[1])
+        if not self._verify_text(gray, *xy):
+            return 0.0, None
+        return float(mx), xy
 
     def _match_coarse(self, gray, x1, y1, x2, y2):
         """大范围搜索用的 _match：缩小后找前 topk 个峰，各自在全分辨率上 ±margin 精修，返回精修分最高者。返回值同 _match。"""
@@ -142,7 +194,7 @@ class ROIProvider:
         sh, sw = self._tpl_small.shape
         if small.shape[0] < sh or small.shape[1] < sw:
             return self._match(gray, x1, y1, x2, y2)
-        res = cv2.matchTemplate(small, self._tpl_small, cv2.TM_CCOEFF_NORMED)
+        res = self._ncc(small, self._tpl_small, self.mask_small)
         best, best_xy, m = 0.0, None, self.coarse_margin
         for _ in range(self.coarse_topk):
             _, mx, _, (sx, sy) = cv2.minMaxLoc(res)
@@ -152,8 +204,8 @@ class ROIProvider:
             wx1, wy1 = max(0, fx - m), max(0, fy - m)
             wx2, wy2 = min(sub.shape[1], fx + tw + m), min(sub.shape[0], fy + th + m)
             if wx2 - wx1 >= tw and wy2 - wy1 >= th:
-                _, fm, _, (lx, ly) = cv2.minMaxLoc(cv2.matchTemplate(sub[wy1:wy2, wx1:wx2], self.tpl, cv2.TM_CCOEFF_NORMED))
-                if fm > best:
+                _, fm, _, (lx, ly) = cv2.minMaxLoc(self._ncc(sub[wy1:wy2, wx1:wx2], self.tpl, self.mask))
+                if fm > best and self._verify_text(gray, x1 + wx1 + lx, y1 + wy1 + ly):
                     best, best_xy = float(fm), (x1 + wx1 + lx, y1 + wy1 + ly)
             res[max(0, sy - sh // 2):sy + sh // 2 + 1, max(0, sx - sw // 2):sx + sw // 2 + 1] = -1   # 压掉该峰再找下一个
         return best, best_xy
@@ -163,12 +215,14 @@ class ROIProvider:
         th, tw = self.tpl.shape
         bx1, by1, bx2, by2 = self.band
         best, best_xy = 0.0, None
-        for half, x1, x2, dx in ((self._tpl_r, 0, tw + 10, -(tw // 2)),          # 左边缘：只看得见名牌右半
-                                 (self._tpl_l, self.w - tw - 10, self.w, 0)):    # 右边缘：只看得见左半
+        for half, hmask, x1, x2, dx in ((self._tpl_r, self.mask_r, 0, tw + 10, -(tw // 2)),          # 左边缘：只看得见名牌右半
+                                        (self._tpl_l, self.mask_l, self.w - tw - 10, self.w, 0)):    # 右边缘：只看得见左半
             sub = gray[by1:by2, max(0, x1):min(self.w, x2)]
             if sub.shape[0] < th or sub.shape[1] < half.shape[1]:
                 continue
-            _, mx, _, loc = cv2.minMaxLoc(cv2.matchTemplate(sub, half, cv2.TM_CCOEFF_NORMED))
+            if hmask is not None and int(hmask.sum()) < 8:
+                continue                                   # 这半边几乎没有文字像素，掩码匹配没意义
+            _, mx, _, loc = cv2.minMaxLoc(self._ncc(sub, half, hmask))
             if mx > best:
                 best, best_xy = float(mx), (max(0, x1) + loc[0] + dx, by1 + loc[1])
         if best >= self.edge_thr:

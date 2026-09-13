@@ -86,7 +86,7 @@ python menu.py
 | camera | source / width / height / ndi_transport | `ndi:<源名关键字>` / 摄像头编号 / 名称关键字（如 `Insta360`）/ 视频路径。`ndi_transport: tcp`（默认；libndi 默认的 RUDP/UDP 在本网上连得上但收不到帧） |
 | screen | output_width/height | 矫正后虚拟游戏画面尺寸（**模板尺寸与其绑定**，改了要重抠模板） |
 | app | show / run_seconds / cv_threads | 菜单「开始检测」的运行方式：不开窗口、到时自动停；`cv_threads: 2`——ROI 只有 300×90，OpenCV 8 线程切不开只是空转（帧率相同、CPU 241% → 148%） |
-| roi.player | template / match_threshold / local_threshold / track_window / mid_window / mid_threshold | 用玩家名牌定位玩家：小窗跟踪(±120) → 丢了先在上一位置 ±mid_window 内找(≥mid_threshold，靠位置连续性认边缘处的低分真名牌) → 再全局搜(≥match_threshold)。摄像头拍屏用 0.82/0.72/0.65；**NDI 清晰画面名牌半透明、暗背景真值只 0.76–0.8，模板只抠名字一圈以内（32×12），阈值 0.70/0.62/0.55**（假峰 ≤0.46）。全局搜索是「粗到精」（`global_coarse_scale: 0.5` / `topk: 20`：缩小找 20 个峰再全分辨率精修，11 ms → 3.7 ms，620 帧只漏 1 帧且下一帧即补）；`global_coarse_scale: 0` 回到整幅全分辨率搜 |
+| roi.player | template / match_threshold / local_threshold / track_window / mid_window / mid_threshold | 用玩家名牌定位玩家：小窗跟踪(±120) → 丢了先在上一位置 ±mid_window 内找(≥mid_threshold，靠位置连续性认边缘处的低分真名牌) → 再全局搜(≥match_threshold)。摄像头拍屏用 0.82/0.72/0.65；**NDI 清晰画面名牌半透明、暗背景真值只 0.76–0.8，模板只抠名字一圈以内（32×12），阈值 0.70/0.62/0.55**（假峰 ≤0.46）。全局搜索是「粗到精」（`global_coarse_scale: 0.5` / `topk: 20`：缩小找 20 个峰再全分辨率精修，11 ms → 3.7 ms，620 帧只漏 1 帧且下一帧即补）；`global_coarse_scale: 0` 回到整幅全分辨率搜。**`text_mask`**（默认关）：只比名字文字像素的掩码匹配（名牌底条半透明，亮背景前整块 NCC 掉到 0.6~0.7 就丢），开之前先用 `tools/nameplate_eval.py` 在录像上看分数分布并重标四个阈值；掩码匹配约 5 倍耗时（跟踪时每帧多 6 ms） |
 | minimap | enabled / region / px_scale / yellow_lo,hi / min_area,max_area / ui_dir / anchor_min | 小地图黄点定位（`minimap.py`）；`patrol.<怪物>.mode: minimap` 时巡逻用它。region 要把整个小地图窗口（含右/下边框）框进来。缩略图区域靠 `templates/_ui/` 三块窗口 UI 模板（标题栏左端/右端、底部条纹）定位，匹配分 <`anchor_min` 沿用上次区域 |
 | roi.world | enabled / deadband / lock_frames / landmark_thr / fix_every / landmark_box | 地图 x 估计（`worldpos.py`）：屏幕 x + 累加镜头位移(bg_dx)，靠地图边界归零或地标匹配防漂移。端点标定时会自动抠地标 |
 | roi | facing / near_offset / far_offset / up / down / scroll_band | 玩家前方 ROI（up/down 只覆盖同一层，默认 70/20——上 135 会把上层平台的怪框进来、站在下面对着够不着的怪挥刀）。near_offset<0 时两侧矩形重叠会自动合并成一个（不重复匹配，怪在哪侧按位置判断）。**菜单「设置 → 检测范围」可在画面上拖框设置**：定格后在角色面朝一侧拖框，自动换算成相对脚底的前/后/上/下距离（左侧拖也行，运行时左右镜像；near 为负 = 从身后开始）。`facing`: **`key`**(用决策按住的方向键定朝向，只检测前进方向，推荐) / `auto`(按位移估计) / `right` / `left` / `both`。far_offset 现为 140（攻击区，不追怪）。scroll_band 是估计背景滚动量的画面带 |
@@ -180,6 +180,7 @@ python tools/wz_sprites.py scale --mob 2230102 --source recordings/harvest_yezhu
 - `tools/event_frames.py logs/run_xxx.jsonl recordings/rec_xxx.mp4 out.jpg [--frames 100,200]`：把 STUCK/掉头等事件时刻的录像帧矫正后拼图（需 `--record` 录的同步录像）。
 - `tools/crops.py logs/run_xxx.jsonl recordings/rec_xxx.mp4 out.jpg 起始帧 结束帧 步长`：玩家周围小图按帧拼条带，看角色在做什么。
 - `tools/measure_scale.py --mob 2230102 [--source 录像] [--write]`：标 `detection.sprite_scale`——暂停后拖框圈住一只怪、回车，几秒出最佳缩放比（`wz_sprites.py scale` 的快速版，换窗口大小后必做）。
+- `tools/nameplate_eval.py --source 录像 --template templates/players/KEEEE.png [--calib ...] [--truth 真值.jsonl]`：名牌整块 NCC vs 文字掩码 NCC 离线对比（分数分布、峰差、位置一致率、最差帧拼图；有真值时给命中率/错锁率），决定要不要开 `text_mask`、阈值怎么标。
 - `tools/wz_map.py find 野猪` / `export --map 101040001` / `platforms --map 101040001`：从客户端 `aa/` 读地图原版几何（foothold 平台、miniMap 参数、传送门、绳梯、刷怪点），格式说明见文件头；名牌兜底和自动巡逻路线的数据来源。
 
 ## 换地图 / 换角色

@@ -141,6 +141,14 @@ B 电脑(Windows, 冒险岛) --OBS DistroAV NDI 输出--> 局域网 --NDI(TCP)--
    **待在真实帧上验证**：缩略图区域宽高比是否等于画布（野猪画布 713×413，8-29 实测区域 169×104，差 6%，可能含边框）；东入口 8-28 实测 1 小地图 px≈10.3 画面 px 反推区域宽 361 px，与野猪的 169 差很多，怀疑当时小地图窗口缩放不同。
 4. 小地图画布贴图在 `spritesheet_fa1998…` 包（`SpriteSheet/CN/Map/Map/Map1/<id>`），将来可拿来自动识别当前在哪张图，未提取。
 5. **术语（自此统一）：控制端 = 跑脚本的机器，被控端 = 跑游戏的机器**（OBS + DistroAV 开 NDI 输出，Pico 插在被控端 USB 上）。旧文里的 A/C = 控制端，B/D = 被控端。
+6. **名牌 text_mask（只比文字像素）已实现，默认关**：`roi.text_mask_of()` 把模板里 >170 的文字像素外扩 1 px 做掩码，`ROIProvider` 的局部/中间层/全局粗到精/边缘半模板
+   四条路都走 `_ncc(mask)`，再加 `_verify_text`（候选处文字亮度 ≥ min_text 且比外圈亮 ≥ min_contrast，拒沙地假峰）。config `roi.player.text_mask.enabled: false` 时代码路径与原来一致——
+   拍屏录像 400 帧新旧 `roi.py` 逐帧 0 差异。评估工具 `tools/nameplate_eval.py`（同一录像上整块 NCC vs 掩码 NCC：分数分布、峰差、位置一致率、最差帧/不一致帧拼图；`--truth` 给逐帧真值时算命中率/错锁率）。
+   **8-22 拍屏录像不能当基准**：未矫正时名牌换个位置形状就变（梯形畸变）；矫正后（本机估的四角）整块 NCC 在离抠图位置远的帧只有 0.65 左右且位置乱跳，勋章牌整块匹配也只有 0.4~0.77，
+   两种方法都锁不住——是拍屏画质（模糊/摩尔纹/逐帧噪声）的问题，不是方法的差别。不一致帧拼图里掩码版落在真名牌上的比例更高、沙地上的掩码分 0.40~0.45 vs 真名牌 0.62~0.75，方向对但没法量化。
+   **定量验证等 NDI 录像**（被控端 NDI 起来后 `app.py --record` 录几分钟，含走过亮地面/天空/宠物贴名牌的片段，跑 `nameplate_eval.py`）。
+   耗时：OpenCV 带掩码的 matchTemplate 是朴素实现，约 5 倍于整块（36×12 模板：局部窗 7.3 ms vs 1.3、中间层 13.3 vs 3.4、全局 0.5× 粗搜 10 vs 2.1）；
+   跟踪正常时每帧只多 6 ms，丢失重搜的帧约 30 ms 会掉帧。要提速就改成「整块粗找 top-K 峰 + 掩码只在峰附近 ±8 px 精修」，等有数据再做。
    本 Windows 机现为控制端：conda env `scan`（Python 3.12，opencv 4.14、cyndilib 0.1.1、UnityPy）2026-09-13 装好并自检通过；`python` 裸命令会命中微软商店占位程序，用 `%USERPROFILE%\.conda\envs\scan\python.exe menu.py` 或先 `conda activate scan`。`config.yaml` 的 `wz.aa_dir` 改为 null（= 仓库根 `aa/`，两端通用）。8 月的录像/日志仍在旧的 Ubuntu 控制端上。
 
 ## 一、2026-08-27 做了什么（按时间）
