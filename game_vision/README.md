@@ -179,6 +179,8 @@ python tools/wz_sprites.py scale --mob 2230102 --source recordings/harvest_yezhu
 - `tools/analyze_run.py logs/run_xxx.jsonl`：真机日志统计——来回趟数与每趟用时、STUCK/RECOVER/GIVEUP 事件、LOST 比例、玩家 x/y 范围。
 - `tools/event_frames.py logs/run_xxx.jsonl recordings/rec_xxx.mp4 out.jpg [--frames 100,200]`：把 STUCK/掉头等事件时刻的录像帧矫正后拼图（需 `--record` 录的同步录像）。
 - `tools/crops.py logs/run_xxx.jsonl recordings/rec_xxx.mp4 out.jpg 起始帧 结束帧 步长`：玩家周围小图按帧拼条带，看角色在做什么。
+- `tools/measure_scale.py --mob 2230102 [--source 录像] [--write]`：标 `detection.sprite_scale`——暂停后拖框圈住一只怪、回车，几秒出最佳缩放比（`wz_sprites.py scale` 的快速版，换窗口大小后必做）。
+- `tools/wz_map.py find 野猪` / `export --map 101040001` / `platforms --map 101040001`：从客户端 `aa/` 读地图原版几何（foothold 平台、miniMap 参数、传送门、绳梯、刷怪点），格式说明见文件头；名牌兜底和自动巡逻路线的数据来源。
 
 ## 换地图 / 换角色
 - 新地图：建 `templates/<怪物名>/`（或运行中按 `t` 直接拖框保存），抠 8–16 张怪物模板（不同动作、含被打击帧），`monster.current` 改为新目录名，或启动时在菜单里选。

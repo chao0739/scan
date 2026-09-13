@@ -124,6 +124,25 @@ B 电脑(Windows, 冒险岛) --OBS DistroAV NDI 输出--> 局域网 --NDI(TCP)--
    本机验证：zip 解压到临时目录 → `install.sh` 全程跑通 → 新 venv 里 `app.py --help`、`import menu` 正常。Windows 脚本未在真机试过。
    顺手修 Codex review 指出的：`templates/_ui`（小地图窗口图样）被 `app.list_monsters()` 当成怪物集 → 现在跳过所有 `_` 开头目录。
 
+### 2026-09-13 名牌定位不准的根因 + 客户端地图数据（tools/wz_map.py）
+1. 用户反馈「名牌定位不准，主要是游戏背景把名牌淹掉」。量了现用模板 KEEEE.png（36×12）：名字文字只占 22% 像素，半透明底条 33%（灰度 53、标准差 29）
+   + 文字过渡区 45%——八成分数来自随背景变的区域，亮地面/天空/密纹理前 NCC 从 0.9 掉到 0.6~0.7 就丢或锁到别人名牌。
+   **YOLO 不适合这件事**（12 px 高的文字分不清是谁的名牌，且要 2 GB 依赖）。方案（都还没做）：
+   (a) 名牌走 masked 匹配只比文字像素（>170 外扩 1 px），加候选文字亮度/对比度校验；
+   (b) 名牌丢失时**差分推算**屏幕位置：Δ屏幕x = Δ小地图黄点×k − Σbg_dx（黄点给世界位移、相位相关给镜头位移，最后一次名牌位置做种子），几秒内误差 ±10~15 px，够 ROI 用；
+   (c) 前景物体真挡住时只能靠 (b) 或勋章牌当第二锚点。
+2. **客户端 aa/ 里有 705 张地图的原版几何数据**（Map.wz 的 Unity 版 `.wzjson`，格式已解，见 `tools/wz_map.py` 文件头）：foothold（平台段+prev/next 链）、
+   miniMap（width/height/centerX/centerY/mag，mag 全是 4）、portal、ladderRope、life（刷怪点）；397 张有 VRLeft/VRRight 镜头边界（勇士部落几张没有）。
+   `python tools/wz_map.py find 野猪` / `export --map 101040001` / `platforms --map 101040001`。用户常去的图：**101040001 野猪的领土**（底层平台 x −563~2003、y 2205；
+   野猪 2230102 刷新点 22 个分布在 y 1695/2055/2205 三层，绳子 8 条）、**101040000 勇士部落东入口**、**000050000 岔道（=文档里的 woniu-mogu）**。
+   交叉验证：岔道 VR −494~2019 = 2513 世界 px，按视野 1280/0.93≈1376 世界 px 算镜头行程 (2513−1376)×0.93≈1057 画面 px，8 月实测航位推算 975 px（有漂移），基本吻合。
+3. 世界坐标 ↔ 画面：世界→矫正画面比例就是 `detection.sprite_scale`（0.93）；小地图黄点 → 世界 x = mm_rel × miniMap.width / 缩略图区域宽 − centerX
+   （缩略图缩放随地图/窗口缩放变，**按每次检测到的区域宽算，不再用固定 px_scale**）。有了 foothold 还能把 y 钉到平台上。
+   **待在真实帧上验证**：缩略图区域宽高比是否等于画布（野猪画布 713×413，8-29 实测区域 169×104，差 6%，可能含边框）；东入口 8-28 实测 1 小地图 px≈10.3 画面 px 反推区域宽 361 px，与野猪的 169 差很多，怀疑当时小地图窗口缩放不同。
+4. 小地图画布贴图在 `spritesheet_fa1998…` 包（`SpriteSheet/CN/Map/Map/Map1/<id>`），将来可拿来自动识别当前在哪张图，未提取。
+5. **术语（自此统一）：控制端 = 跑脚本的机器，被控端 = 跑游戏的机器**（OBS + DistroAV 开 NDI 输出，Pico 插在被控端 USB 上）。旧文里的 A/C = 控制端，B/D = 被控端。
+   本 Windows 机现为控制端：conda env `scan`（Python 3.12，opencv 4.14、cyndilib 0.1.1、UnityPy）2026-09-13 装好并自检通过；`python` 裸命令会命中微软商店占位程序，用 `%USERPROFILE%\.conda\envs\scan\python.exe menu.py` 或先 `conda activate scan`。`config.yaml` 的 `wz.aa_dir` 改为 null（= 仓库根 `aa/`，两端通用）。8 月的录像/日志仍在旧的 Ubuntu 控制端上。
+
 ## 一、2026-08-27 做了什么（按时间）
 
 1. **P7 端点巡逻**（`decision._patrol`）：朝目标端点走，x 进端点 ±30 内翻转；未标端点退回按时间掉头。菜单「巡逻端点」现场标定。

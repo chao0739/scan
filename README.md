@@ -1,15 +1,15 @@
 # 冒险岛外置视觉自动巡逻 — 安装 / 部署（final v3，2026-08-29）
 
-两台电脑：**D 跑游戏，C 跑脚本**。项目说明见 `game_vision/README.md`，开发记录见 `docs/PROGRESS.md`，早期规格/路线图在 `archive/`。
+两台电脑：**被控端跑游戏，控制端跑脚本**（旧文里的 D/B = 被控端，C/A = 控制端）。项目说明见 `game_vision/README.md`，开发记录见 `docs/PROGRESS.md`，早期规格/路线图在 `archive/`。
 
 角色分工（和现在的 B/A 一样）：
 
 | 电脑 | 干什么 | 要装什么 |
 |---|---|---|
-| **D 游戏机**（Windows） | 跑冒险岛；OBS 把游戏画面用 NDI 发到局域网；**Pico 插在这台机的 USB 上**给游戏发按键 | 游戏、OBS + DistroAV（NDI 输出插件）、Pico 用 USB 线插上 |
-| **C 脚本机**（Ubuntu / Windows / macOS 都行） | 收 NDI 画面 → 识别 → 通过 Wi-Fi 给 Pico 发命令 | 本包（`install.sh` / `install.bat`） |
+| **被控端**（D 游戏机，Windows） | 跑冒险岛；OBS 把游戏画面用 NDI 发到局域网；**Pico 插在这台机的 USB 上**给游戏发按键 | 游戏、OBS + DistroAV（NDI 输出插件）、Pico 用 USB 线插上 |
+| **控制端**（C 脚本机，Ubuntu / Windows / macOS 都行） | 收 NDI 画面 → 识别 → 通过 Wi-Fi 给 Pico 发命令 | 本包（`install.sh` / `install.bat`） |
 
-三者（C、D、Pico）在**同一个局域网**。Pico 只连 2.4 GHz Wi-Fi。
+三者（控制端、被控端、Pico）在**同一个局域网**。Pico 只连 2.4 GHz Wi-Fi。
 
 ## 第 0 步：在旧电脑上打包（一次）
 ```bash

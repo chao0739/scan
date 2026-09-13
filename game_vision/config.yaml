@@ -160,5 +160,6 @@ logging:
   dir: logs
   console_every_n: 15
 
-wz:                    # 游戏客户端 Unity Addressables 资源目录（含 catalog.bin 和 w/*.bundle），tools/wz_sprites.py 用
-  aa_dir: /home/cc/scan/aa
+wz:                    # 游戏客户端 Unity Addressables 资源目录（含 catalog.bin 和 w/*.bundle），tools/wz_sprites.py / wz_map.py 用
+  aa_dir: null         # null = 用仓库根目录的 aa/（Linux /home/cc/scan/aa 和 Windows 都是这个位置）；也可填绝对路径，
+                       # 如游戏自带的 C:/Program Files/上海数龙科技有限公司/冒险岛online/mxdclassic/Maplestory_Classic_Data/StreamingAssets/aa
