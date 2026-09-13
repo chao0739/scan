@@ -125,6 +125,8 @@ python menu.py
 - **不要把 B 机改成 720p 输出**：模拟实测名牌假峰从 0.48 涨到 0.68（阈值 0.70），会跟错；处理耗时也不会少（矫正后都是 1280×720）。
   掉帧先查本机 CPU：跑图时别同时跑采集/去重/离线分析，A 机 OBS 不看画面时可以把它的 NDI 源停掉。
   单帧开销见下面「当前指标」：模板匹配占 70%，`detection.idle_skip` / `app.cv_threads` / 名牌粗到精搜索三项默认已开，30 fps 不掉帧、CPU 134%。
+- **控制端 OBS 可以和脚本同时收同一路源**（给人看用），但本机 OBS 也要走 TCP 才有画面：把 `.ndi/ndi-config.v1.json` 那份配置放到 `%APPDATA%\NDI\`、用户环境变量 `NDI_CONFIG_DIR` 指过去，重启 OBS。Finder 在进程内是共享常驻的（`camera.shared_finder`），别自己再 `Finder().open()/close()`——同进程重开第二个 Finder 后建 Receiver 会偶发访问违例。
+- **NDI 断流不退出**：3 s 没新帧先松开全部按键，断满 `camera.ndi_reconnect_s`(10 s) 自动重连，被控端恢复后继续；首连「连上但没帧」会隔 2 s 重试 2 次。「源可见、能连、就是没帧」= 被控端没在发（OBS 输出重启 / CPU 过载 / 它的 Wi-Fi 上行），去被控端查。
 - **控制端自己别开 NDI 输出**：本机 OBS 若也开了 DistroAV 主输出，源名会和被控端撞车（都叫 Game-PC），`camera.py` 现在优先选非本机的源并打印命中了谁；写全名（如 `ndi:THINKPAD`）最保险。菜单列源要等满 3 s，别的机器的源靠 mDNS 晚 1~3 s 才出现。
 - **Pico 的按键是发到 B 机当前焦点窗口的**：B 机开着 OBS 时要把游戏窗口点回前台，否则脚本"OK"了但角色不动。
 

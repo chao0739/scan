@@ -156,6 +156,15 @@ B 电脑(Windows, 冒险岛) --OBS DistroAV NDI 输出--> 局域网 --NDI(TCP)--
    `list_ndi_sources` 等满 timeout 收齐。实测 `ndi:Game-PC` 现在选 THINKPAD-CC。
    **被控端目前 OBS 画布 1280×720、游戏窗口只占左上 1140×640**——文档早说过别用 720p（名牌假峰 0.48→0.68），要改成 1920×1080 画布 + 尽量大的游戏窗口，
    然后控制端重做自动标定、重抠名牌、重测 sprite_scale。控制端本机的 OBS 不需要开；开着也别开 NDI 主输出。
+8. **「OBS 和脚本同时开就崩」是错的诊断，真正的两件事**（2026-09-13 17:00–17:30，控制端）：
+   (a) **同一进程重开 Finder 会偶发把进程崩掉**：先 `list_ndi_sources()`（开 Finder→关）再 `FrameSource`（新 Finder→Receiver），`Receiver(...)` 那行访问违例
+   （exit 0xC0000005，faulthandler 定位 camera.py:196），本机 OBS 同时在收同一路源时 3 次崩 1~2 次；app.py 只开一个 Finder 从没崩，但 menu.py 同进程先列源再启动检测会中招。
+   改成 `camera.shared_finder()` 进程内常驻一个 Finder 后：列→连 6 次、模拟菜单（列→连→断→连→列）3 次，零崩溃。**OBS 和脚本可以同时开**，和以前一样。
+   (b) **被控端间歇性「接受连接但一帧不发」**：源在 mDNS 上一直可见、TCP 5961 秒连，但 8 s 内 0 帧、本机 Wi-Fi 8 s 只收 0.02 MB；好的时候连上 0.9~2.5 s 出首帧、30 fps 稳 40 s 后又整段停发，
+   17:18 起连续 10 多分钟 0 帧（16 次尝试）。本机 Wi-Fi 5 GHz ax 1.7 Gbps 信号 74%，关掉本机 OBS 也一样——瓶颈在 ThinkPad 那头（OBS 输出在重启 / CPU / 它自己的 Wi-Fi 上行），待去被控端查。
+   对策已做：`FrameSource` 首连失败隔 2 s 重试 2 次；app.py 主循环遇 NDI 断流不再 break——先 `decision.release_all()` 松键，断满 `camera.ndi_reconnect_s`(10) 秒 `src.reconnect()`，恢复后继续。
+   用假源（0~3 s 正常→断 13 s→恢复）验证：3 s 报断流并松键、12 s 重连、恢复后继续出帧、按 --seconds 正常停。真源上的恢复路径等被控端稳定后再看。
+   顺带：本机 OBS 收 NDI 也要走 TCP 才有画面，已把强制 TCP 的 ndi-config.v1.json 放到 %APPDATA%\NDI 并设用户级 NDI_CONFIG_DIR（重启 OBS 生效）。
    本 Windows 机现为控制端：conda env `scan`（Python 3.12，opencv 4.14、cyndilib 0.1.1、UnityPy）2026-09-13 装好并自检通过；`python` 裸命令会命中微软商店占位程序，用 `%USERPROFILE%\.conda\envs\scan\python.exe menu.py` 或先 `conda activate scan`。`config.yaml` 的 `wz.aa_dir` 改为 null（= 仓库根 `aa/`，两端通用）。8 月的录像/日志仍在旧的 Ubuntu 控制端上。
 
 ## 一、2026-08-27 做了什么（按时间）

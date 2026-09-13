@@ -7,6 +7,7 @@ camera:
   height: 1080
   loop_video: false    # 视频文件播放到结尾是否循环
   ndi_transport: tcp   # NDI 传输：tcp（实测唯一能出图的）/ auto（libndi 默认，优先 RUDP，本网上收不到帧）
+  ndi_reconnect_s: 10  # NDI 断流（3 s 没新帧）后：先松开全部按键等待，断满这么多秒就重连一次（失败则再等这么久再试）；不再像以前那样直接退出
 
 app:                   # 菜单「开始检测」的运行方式（命令行等价：--no-show / --seconds N）
   show: true           # 运行时显示画面窗口。false=不开窗口（省 CPU；Ctrl+C 或到时自动停）

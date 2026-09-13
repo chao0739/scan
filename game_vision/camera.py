@@ -135,38 +135,60 @@ def pick_ndi_source(names, keyword):
     return (exact or remote or hits)[0], hits
 
 
+_FINDER = None
+
+
+def shared_finder(transport="tcp"):
+    """进程内唯一的 NDI Finder：打开一次常驻，退出时 atexit 关。
+    2026-09-13 踩坑：同一进程里先 list_ndi_sources()（开 Finder→关）再 FrameSource（新 Finder→Receiver），
+    Receiver 创建那一行偶发访问违例把进程直接杀掉（本机 OBS 同时在收同一路源时 3 次里崩 1~2 次；app.py 只开一个 Finder 从没崩过，
+    menu.py 在同一进程里列源后再启动检测就会中招）。只开一个 Finder、Receiver 复用它就不崩。
+    另外刚打开的 Finder 要 1~3 s 才收齐 mDNS 公告，常驻的不用每次重等。"""
+    global _FINDER
+    _ndi_prepare(transport)
+    if _FINDER is None:
+        import atexit
+        from cyndilib.finder import Finder
+        f = Finder()
+        f.open()
+        _FINDER = f
+        atexit.register(_close_shared_finder)
+    return _FINDER
+
+
+def _close_shared_finder():
+    global _FINDER
+    f, _FINDER = _FINDER, None
+    if f is not None:
+        try:
+            f.close()
+        except Exception:
+            pass
+
+
 def list_ndi_sources(timeout=3.0, transport="tcp"):
     """局域网上可见的 NDI 源名字列表：等满 timeout 秒把能发现的都收齐（本机 OBS 的输出 0.1 s 就出现、
     别的机器靠 mDNS 要 1~3 s——以前一有源就返回，菜单里只列得出本机那路）。"""
-    _ndi_prepare(transport)
-    from cyndilib.finder import Finder
-    f = Finder()
-    f.open()
-    try:
-        seen = []
-        t_end = time.time() + timeout
-        while time.time() < t_end:
-            f.wait_for_sources(timeout=1.0)
-            for n in f.get_source_names():
-                if n not in seen:
-                    seen.append(n)
-        return seen
-    finally:
-        f.close()
+    f = shared_finder(transport)
+    seen = []
+    t_end = time.time() + timeout
+    while time.time() < t_end:
+        f.wait_for_sources(timeout=1.0)
+        for n in f.get_source_names():
+            if n not in seen:
+                seen.append(n)
+    return seen
 
 
 class _NDIReceiver:
     """按名字关键字连一个 NDI 源，read() 返回最新的 BGR 帧（只在有新帧时返回）。"""
 
     def __init__(self, keyword, transport="tcp", timeout=8.0):
-        _ndi_prepare(transport)
-        from cyndilib.finder import Finder
         from cyndilib.receiver import Receiver
         from cyndilib.video_frame import VideoFrameSync
         from cyndilib.wrapper.ndi_recv import RecvBandwidth, RecvColorFormat
 
-        self.finder = Finder()
-        self.finder.open()
+        self.finder = shared_finder(transport)      # 进程内共享，不在这里开/关（见 shared_finder）
         name, names, hits = None, [], []
         t_end = time.time() + timeout
         # 命中本机 OBS 自己的输出时再多等 2 s：别的机器的源靠 mDNS 晚 1~3 s 才出现，不然会先连上本机那路（见 pick_ndi_source）
@@ -184,7 +206,6 @@ class _NDIReceiver:
             if time.time() >= t_local_grace:
                 break
         if name is None:
-            self.finder.close()
             raise RuntimeError(f"找不到 NDI 源 '{keyword}'；当前可见: {', '.join(names) if names else '无'}"
                                "（确认被控端 OBS 已开启 NDI 输出、两台机器在同一局域网）")
         if len(hits) > 1:
@@ -234,10 +255,7 @@ class _NDIReceiver:
             self.recv.disconnect()
         except Exception:
             pass
-        try:
-            self.finder.close()
-        except Exception:
-            pass
+        # Finder 是进程内共享的，这里不关（见 shared_finder）
 
 
 def resolve_source(source):
@@ -326,11 +344,11 @@ class FrameSource:
         self._fps_est = 0.0
         self.ndi = None
         self.cap = None
+        self._ndi_keyword = self._ndi_transport = None
         if is_ndi_source(source):
             self.is_file, self.loop_video = False, False
-            self.ndi = _NDIReceiver(str(source).strip()[len(NDI_PREFIX):], ndi_transport)
-            self.fps, self.width, self.height = self.ndi.fps, self.ndi.width, self.ndi.height
-            print(f"[ndi] 已连接 '{self.ndi.name}' {self.width}x{self.height} @{self.fps:.0f}fps 传输={ndi_transport}")
+            self._ndi_keyword, self._ndi_transport = str(source).strip()[len(NDI_PREFIX):], ndi_transport
+            self._ndi_connect(retries=2)
             return
         source = resolve_source(source)
         self.is_file = isinstance(source, str)
@@ -345,6 +363,40 @@ class FrameSource:
         self.fps = fps if (fps and 1 <= fps <= 120) else 30.0  # 摄像头常返回 -1/0
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    def _ndi_connect(self, retries=2):
+        """连 NDI 源并等到首帧；「连上但没帧」时隔 2 s 再试 retries 次（发送端偶发一阵不发数据，2026-09-13 实测多次）。"""
+        last = None
+        for i in range(1, retries + 2):
+            try:
+                self.ndi = _NDIReceiver(self._ndi_keyword, self._ndi_transport)
+                self.fps, self.width, self.height = self.ndi.fps, self.ndi.width, self.ndi.height
+                print(f"[ndi] 已连接 '{self.ndi.name}' {self.width}x{self.height} @{self.fps:.0f}fps 传输={self._ndi_transport}")
+                return
+            except RuntimeError as e:
+                last = e
+                self.ndi = None
+                if i <= retries:
+                    print(f"[ndi] 第 {i} 次连接失败：{str(e)[:60]}… 2 s 后重试")
+                    time.sleep(2)
+        raise last
+
+    def reconnect(self):
+        """NDI 断流后重连（先断开旧接收器）。成功 True，失败 False（源没了 / 仍然没帧）。"""
+        if self._ndi_keyword is None:
+            return False
+        if self.ndi is not None:
+            try:
+                self.ndi.release()
+            except Exception:
+                pass
+            self.ndi = None
+        try:
+            self._ndi_connect(retries=0)
+            return True
+        except RuntimeError as e:
+            print(f"[ndi] 重连失败：{str(e)[:80]}")
+            return False
 
     def read(self):
         if self.ndi is not None:

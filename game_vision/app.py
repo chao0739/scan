@@ -338,6 +338,8 @@ def main(argv=None):
     last_state = None
     was_stuck = False
     frame_period = 1.0 / src.fps if args.realtime else 0
+    stall_since = None                                            # NDI 断流开始时刻（见循环里的处理）
+    ndi_reconnect_s = float(cfg["camera"].get("ndi_reconnect_s", 10))
     t_start = time.perf_counter()
     try:
         while True:
@@ -347,8 +349,28 @@ def main(argv=None):
                 break
             ok, frame = src.read()
             if not ok:
-                print("[app] 视频源结束")
-                break
+                if src.ndi is None:
+                    print("[app] 视频源结束")
+                    break
+                # NDI 断流（read 已等了 3 s 没新帧）：不退出。先松键保安全，等一会儿再重连；发送端恢复后自动继续。
+                # 2026-09-13 实测被控端会间歇性「连着但不发帧」几十秒到几分钟，以前这里直接 break 会把整轮跑挂掉。
+                now_s = time.perf_counter()
+                if stall_since is None:
+                    stall_since = now_s
+                    print(f"[ndi] 3 s 没有新帧（被控端 OBS 没在推流 / Wi-Fi 断了？）已松开全部按键，等待恢复…（第 {src.frame_index} 帧后）")
+                    if decision is not None:
+                        decision.release_all()
+                elif now_s - stall_since >= ndi_reconnect_s:
+                    print(f"[ndi] 断流 {now_s - stall_since:.0f} s，重连…")
+                    if src.reconnect():
+                        print("[ndi] 已恢复")
+                        stall_since = None
+                    else:
+                        stall_since = now_s          # 失败：再等 ndi_reconnect_s 后下一次重连
+                continue
+            if stall_since is not None:
+                print(f"[ndi] 已恢复（断了 {time.perf_counter() - stall_since:.0f} s）")
+                stall_since = None
             if writer is not None:
                 writer.write(frame)
             t0 = time.perf_counter()
