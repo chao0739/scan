@@ -153,11 +153,11 @@ pip install -r game_vision\requirements-tools.txt
 
 官方等价做法是 `install.bat --tools`（走 `.venv` 路线时用）。
 
-**2. 指向客户端资源目录**。`config.yaml` 里 `wz.aa_dir` 是仓库作者机器的 Linux 路径，必须改：
+**2. 指向客户端资源目录**。`config.yaml` 里 `wz.aa_dir` 默认 `null`，意思是用**仓库根目录的 `aa/`**（把客户端的 `aa` 复制或解压到 `scan\aa` 即可，两端通用）。放在别处才需要填绝对路径：
 
 ```yaml
 wz:
-  aa_dir: C:\Users\<用户名>\Desktop\scan\aa
+  aa_dir: C:\Program Files\<游戏目录>\Maplestory_Classic_Data\StreamingAssets\aa
 ```
 
 `aa` 是 Unity Addressables 目录，在游戏安装目录的 `<游戏名>_Data\StreamingAssets\aa\`，约 2.2 GB。
@@ -168,7 +168,7 @@ wz:
 Get-Process | Where-Object { $_.Path -like "*aple*" } | Select-Object Name, Path
 ```
 
-**3. 生成精灵库**（约 1 分钟，输出到 `templates/_wz/`，同样不入库）：
+**3. 生成精灵库**（本机实测约 7 分钟，856 只怪 16 635 帧、约 180 MB，输出到 `templates/_wz/`，同样不入库）：
 
 ```powershell
 python tools\wz_sprites.py extract-all
