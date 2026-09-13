@@ -149,6 +149,13 @@ B 电脑(Windows, 冒险岛) --OBS DistroAV NDI 输出--> 局域网 --NDI(TCP)--
    **定量验证等 NDI 录像**（被控端 NDI 起来后 `app.py --record` 录几分钟，含走过亮地面/天空/宠物贴名牌的片段，跑 `nameplate_eval.py`）。
    耗时：OpenCV 带掩码的 matchTemplate 是朴素实现，约 5 倍于整块（36×12 模板：局部窗 7.3 ms vs 1.3、中间层 13.3 vs 3.4、全局 0.5× 粗搜 10 vs 2.1）；
    跟踪正常时每帧只多 6 ms，丢失重搜的帧约 30 ms 会掉帧。要提速就改成「整块粗找 top-K 峰 + 掩码只在峰附近 ±8 px 精修」，等有数据再做。
+7. **「OBS 画面过不来」根因 = 源名撞车**：控制端自己的 OBS 也开着 DistroAV 主输出、名字也叫 Game-PC，`ndi:Game-PC` 先匹配到本机那路
+   `PLP16S-5YWCJX (Game-PC)`（空场景，全黑），被控端 `THINKPAD-CC (game-pc)`（192.168.1.162）其实在网上、TCP 收帧正常（4 s 124 帧）。
+   另外 `list_ndi_sources` 一发现源就返回，本机那路 0.1 s 就出现、别的机器靠 mDNS 晚 1~3 s，所以菜单里只列得出本机的。
+   修（`camera.py`）：`pick_ndi_source` 整名相等 > 非本机的源 > 本机 OBS 自己的输出，命中多个时打印选了谁；命中本机时再等 2 s 看有没有远端；
+   `list_ndi_sources` 等满 timeout 收齐。实测 `ndi:Game-PC` 现在选 THINKPAD-CC。
+   **被控端目前 OBS 画布 1280×720、游戏窗口只占左上 1140×640**——文档早说过别用 720p（名牌假峰 0.48→0.68），要改成 1920×1080 画布 + 尽量大的游戏窗口，
+   然后控制端重做自动标定、重抠名牌、重测 sprite_scale。控制端本机的 OBS 不需要开；开着也别开 NDI 主输出。
    本 Windows 机现为控制端：conda env `scan`（Python 3.12，opencv 4.14、cyndilib 0.1.1、UnityPy）2026-09-13 装好并自检通过；`python` 裸命令会命中微软商店占位程序，用 `%USERPROFILE%\.conda\envs\scan\python.exe menu.py` 或先 `conda activate scan`。`config.yaml` 的 `wz.aa_dir` 改为 null（= 仓库根 `aa/`，两端通用）。8 月的录像/日志仍在旧的 Ubuntu 控制端上。
 
 ## 一、2026-08-27 做了什么（按时间）

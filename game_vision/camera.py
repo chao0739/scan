@@ -20,6 +20,7 @@ Linux(V4L2) 注意事项（Ubuntu 迁移时实测，Insta360 Ace Pro 2）：
 import glob
 import json
 import os
+import socket
 import sys
 import time
 
@@ -108,20 +109,48 @@ def _ndi_prepare(transport="tcp"):
         raise RuntimeError("NDI 源需要 cyndilib：pip install cyndilib") from e
 
 
+def local_host_lower():
+    """本机主机名（小写）。NDI 源名是「主机名 (输出名)」，用它认出本机 OBS 自己开的输出。"""
+    try:
+        return socket.gethostname().strip().lower()
+    except Exception:
+        return ""
+
+
+def is_local_ndi_source(name):
+    h = local_host_lower()
+    return bool(h) and name.strip().lower().startswith(h + " (")
+
+
+def pick_ndi_source(names, keyword):
+    """按关键字在源名列表里选一个：整名相等 > 非本机的源 > 本机 OBS 自己的输出。返回 (选中, 全部命中)。
+    2026-09-13 踩坑：控制端自己的 OBS 也开着 NDI 主输出、名字也叫 Game-PC，`ndi:Game-PC` 匹配到了本机那路（一个空场景，全黑），
+    被控端 THINKPAD-CC (game-pc) 明明在网上却「画面过不来」。"""
+    key = keyword.strip().lower()
+    hits = [n for n in names if key in n.lower()] if key else list(names)
+    if not hits:
+        return None, []
+    exact = [n for n in hits if n.strip().lower() == key]
+    remote = [n for n in hits if not is_local_ndi_source(n)]
+    return (exact or remote or hits)[0], hits
+
+
 def list_ndi_sources(timeout=3.0, transport="tcp"):
-    """局域网上可见的 NDI 源名字列表（等最多 timeout 秒）。"""
+    """局域网上可见的 NDI 源名字列表：等满 timeout 秒把能发现的都收齐（本机 OBS 的输出 0.1 s 就出现、
+    别的机器靠 mDNS 要 1~3 s——以前一有源就返回，菜单里只列得出本机那路）。"""
     _ndi_prepare(transport)
     from cyndilib.finder import Finder
     f = Finder()
     f.open()
     try:
+        seen = []
         t_end = time.time() + timeout
         while time.time() < t_end:
             f.wait_for_sources(timeout=1.0)
-            names = list(f.get_source_names())
-            if names:
-                return names
-        return list(f.get_source_names())
+            for n in f.get_source_names():
+                if n not in seen:
+                    seen.append(n)
+        return seen
     finally:
         f.close()
 
@@ -136,21 +165,33 @@ class _NDIReceiver:
         from cyndilib.video_frame import VideoFrameSync
         from cyndilib.wrapper.ndi_recv import RecvBandwidth, RecvColorFormat
 
-        key = keyword.strip().lower()
         self.finder = Finder()
         self.finder.open()
-        name, names = None, []
+        name, names, hits = None, [], []
         t_end = time.time() + timeout
-        while name is None and time.time() < t_end:
+        # 命中本机 OBS 自己的输出时再多等 2 s：别的机器的源靠 mDNS 晚 1~3 s 才出现，不然会先连上本机那路（见 pick_ndi_source）
+        t_local_grace = None
+        while time.time() < t_end:
             self.finder.wait_for_sources(timeout=1.0)
             names = list(self.finder.get_source_names())
-            hits = [n for n in names if key in n.lower()] if key else names
-            if hits:
-                name = hits[0]
+            name, hits = pick_ndi_source(names, keyword)
+            if name is None:
+                continue
+            if not is_local_ndi_source(name):
+                break
+            if t_local_grace is None:
+                t_local_grace = time.time() + 2.0
+            if time.time() >= t_local_grace:
+                break
         if name is None:
             self.finder.close()
             raise RuntimeError(f"找不到 NDI 源 '{keyword}'；当前可见: {', '.join(names) if names else '无'}"
-                               "（确认 B 机 OBS 已开启 NDI 输出、两台机器在同一局域网）")
+                               "（确认被控端 OBS 已开启 NDI 输出、两台机器在同一局域网）")
+        if len(hits) > 1:
+            print(f"[ndi] 关键字 '{keyword}' 命中 {len(hits)} 个源: {', '.join(hits)} -> 选 '{name}'"
+                  + ("（本机 OBS 自己的输出，多半不是你要的：关掉本机 OBS 的 NDI 主输出，或把关键字写成被控端的名字）" if is_local_ndi_source(name) else "（优先非本机的源）"))
+        elif is_local_ndi_source(name):
+            print(f"[ndi] 注意：'{name}' 是本机 OBS 自己的 NDI 输出，不是被控端的画面")
         self.name = name
         self.recv = Receiver(color_format=RecvColorFormat.BGRX_BGRA, bandwidth=RecvBandwidth.highest,
                              recv_name="game_vision")
